@@ -13,7 +13,11 @@ interface Metrics {
   contacto_visual_color: string;
 }
 
-export default function CameraComponent() {
+interface CameraComponentProps {
+  stream?: MediaStream | null;
+}
+
+export default function CameraComponent({ stream: providedStream }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     movilidad: "Conectando al backend...",
@@ -86,8 +90,59 @@ export default function CameraComponent() {
 
     connectWebSocket();
 
-    // Iniciar cámara
-    if (navigator.mediaDevices?.getUserMedia) {
+    const ownsStream = !providedStream;
+
+    const attachStream = (mediaStream: MediaStream) => {
+      if (!isMounted) {
+        if (ownsStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+        }
+        return;
+      }
+      stream = mediaStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = mediaStream;
+      }
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+
+      intervalId = setInterval(() => {
+        const video = videoRef.current;
+        if (
+          video &&
+          video.readyState >= 2 &&
+          video.videoWidth > 0 &&
+          ws &&
+          ws.readyState === WebSocket.OPEN &&
+          !isSubmitting
+        ) {
+          isSubmitting = true;
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx?.drawImage(video, 0, 0);
+
+          canvas.toBlob(
+            (blob) => {
+              try {
+                if (blob && ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(blob);
+                }
+              } finally {
+                isSubmitting = false;
+              }
+            },
+            "image/jpeg",
+            0.85
+          );
+        }
+      }, 100);
+    };
+
+    // The calibration step already opened the camera. Reuse that stream.
+    if (providedStream) {
+      attachStream(providedStream);
+    } else if (navigator.mediaDevices?.getUserMedia) {
       navigator.mediaDevices
         .getUserMedia({
           video: {
@@ -95,50 +150,7 @@ export default function CameraComponent() {
             height: { ideal: 720 },
           },
         })
-        .then((mediaStream) => {
-          if (!isMounted) {
-            mediaStream.getTracks().forEach((track) => track.stop());
-            return;
-          }
-          stream = mediaStream;
-          if (videoRef.current) {
-            videoRef.current.srcObject = mediaStream;
-          }
-
-          const canvas = document.createElement("canvas");
-          const ctx = canvas.getContext("2d");
-
-          intervalId = setInterval(() => {
-            const video = videoRef.current;
-            if (
-              video &&
-              video.readyState >= 2 &&
-              video.videoWidth > 0 &&
-              ws &&
-              ws.readyState === WebSocket.OPEN &&
-              !isSubmitting
-            ) {
-              isSubmitting = true;
-              canvas.width = video.videoWidth;
-              canvas.height = video.videoHeight;
-              ctx?.drawImage(video, 0, 0);
-
-              canvas.toBlob(
-                (blob) => {
-                  try {
-                    if (blob && ws && ws.readyState === WebSocket.OPEN) {
-                      ws.send(blob);
-                    }
-                  } finally {
-                    isSubmitting = false;
-                  }
-                },
-                "image/jpeg",
-                0.85
-              );
-            }
-          }, 100);
-        })
+        .then(attachStream)
         .catch((err) => {
           console.error("🔴 Error al acceder a la cámara:", err);
           if (isMounted) {
@@ -163,11 +175,11 @@ export default function CameraComponent() {
         ws.onclose = null;
         ws.close();
       }
-      if (stream) {
+      if (ownsStream && stream) {
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, []);
+  }, [providedStream]);
 
   return (
     <div className="flex gap-4 p-6 bg-gray-950 min-h-screen text-white">
