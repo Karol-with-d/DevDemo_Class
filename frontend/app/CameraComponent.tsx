@@ -15,9 +15,10 @@ interface Metrics {
 
 interface CameraComponentProps {
   stream?: MediaStream | null;
+  embedded?: boolean;
 }
 
-export default function CameraComponent({ stream: providedStream }: CameraComponentProps) {
+export default function CameraComponent({ stream: providedStream, embedded = false }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     movilidad: "Conectando al backend...",
@@ -41,20 +42,31 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
     let isMounted = true;
     let reconnectTimeout: NodeJS.Timeout | null = null;
 
+    const releaseSocket = (socket: WebSocket) => {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    };
+
     function connectWebSocket() {
       if (!isMounted) return;
 
       try {
-        ws = new WebSocket("ws://127.0.0.1:8000/ws/pose-analysis");
+        const socket = new WebSocket("ws://127.0.0.1:8000/ws/pose-analysis");
+        ws = socket;
 
-        ws.onopen = () => {
-          if (!isMounted) return;
+        socket.onopen = () => {
+          if (!isMounted || ws !== socket) return;
           console.log("🟢 WebSocket Conectado al Backend");
           setBackendConnected(true);
         };
 
-        ws.onmessage = (event) => {
-          if (!isMounted) return;
+        socket.onmessage = (event) => {
+          if (!isMounted || ws !== socket) return;
           try {
             const data: Metrics = JSON.parse(event.data);
             setMetrics(data);
@@ -63,12 +75,8 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
           }
         };
 
-        ws.onerror = (err) => {
-          console.warn("⚠️ WebSocket error:", err);
-        };
-
-        ws.onclose = () => {
-          if (!isMounted) return;
+        socket.onclose = () => {
+          if (!isMounted || ws !== socket) return;
           console.log("🔴 WebSocket desconectado");
           setBackendConnected(false);
           setMetrics((prev) => ({
@@ -172,8 +180,8 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
       if (intervalId) clearInterval(intervalId);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) {
-        ws.onclose = null;
-        ws.close();
+        releaseSocket(ws);
+        ws = null;
       }
       if (ownsStream && stream) {
         stream.getTracks().forEach((track) => track.stop());
@@ -182,10 +190,10 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
   }, [providedStream]);
 
   return (
-    <div className="flex gap-4 p-6 bg-gray-950 min-h-screen text-white">
+    <div className={`analysis-shell flex flex-col md:flex-row gap-4 text-white ${embedded ? "min-h-0 bg-transparent p-0" : "min-h-screen bg-gray-950 p-3 sm:p-6"}`}>
       {/* Live Video Feed */}
       <div
-        className={`w-1/2 bg-black rounded-xl overflow-hidden flex flex-col items-center justify-center border transition-all duration-300 relative min-h-[460px] ${
+        className={`analysis-video w-full md:w-1/2 min-w-0 bg-black rounded-xl overflow-hidden flex flex-col items-center justify-center border transition-all duration-300 relative aspect-video md:aspect-auto md:min-h-[460px] ${
           metrics.de_espaldas
             ? "border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.6)] ring-2 ring-red-500"
             : "border-gray-800"
@@ -208,9 +216,9 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
 
         {/* Live Warning Banner When Back is Turned */}
         {metrics.de_espaldas && (
-          <div className="absolute inset-x-4 top-16 bg-red-600/95 backdrop-blur-md text-white p-3 rounded-xl border border-red-300 shadow-2xl flex items-center gap-3 animate-bounce z-20">
-            <span className="text-3xl">⚠️</span>
-            <div>
+          <div className="absolute inset-x-2 top-12 sm:inset-x-4 sm:top-16 bg-red-600/95 backdrop-blur-md text-white p-2.5 sm:p-3 rounded-xl border border-red-300 shadow-2xl flex items-start gap-2 sm:gap-3 z-20">
+            <span className="text-2xl sm:text-3xl leading-none">⚠️</span>
+            <div className="min-w-0">
               <p className="font-extrabold text-sm tracking-wide">
                 ¡ALERTA: ESTÁS DE ESPALDAS!
               </p>
@@ -222,7 +230,7 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
         )}
 
         {/* Status Badge */}
-        <div className="absolute top-3 left-3 bg-black/70 backdrop-blur px-3 py-1 rounded-full text-xs flex items-center gap-2 z-10 border border-gray-700">
+        <div className="absolute top-2 left-2 sm:top-3 sm:left-3 max-w-[calc(100%-1rem)] bg-black/70 backdrop-blur px-3 py-1 rounded-full text-[11px] sm:text-xs flex items-center gap-2 z-10 border border-gray-700">
           <span
             className={`w-2.5 h-2.5 rounded-full ${
               backendConnected ? "bg-green-500 animate-pulse" : "bg-red-500"
@@ -233,24 +241,24 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
       </div>
 
       {/* Real-time Feedback Panel */}
-      <div className="w-1/2 bg-gray-900 p-6 rounded-xl flex flex-col justify-between gap-4 border border-gray-800">
-        <div>
-          <h2 className="text-2xl font-bold text-blue-400">Feedback de Postura en Vivo</h2>
-          <p className="text-xs text-gray-400 mt-1">
+      <div className="analysis-panel w-full md:w-1/2 min-w-0 bg-gray-900 p-4 sm:p-6 rounded-xl flex flex-col justify-between gap-4 border border-gray-800">
+        <div className="analysis-heading">
+          <h2 className="text-2xl sm:text-3xl font-bold text-blue-400">Feedback de Postura en Vivo</h2>
+          <p className="analysis-subtitle text-sm text-gray-400 mt-1">
             Análisis biométrico y facial en tiempo real vía MediaPipe (Pose + Face Landmarker)
           </p>
         </div>
 
         {/* 1. Orientación Corporal (Alerta de espaldas) */}
         <div
-          className={`p-4 rounded-xl border transition-all duration-300 ${
+          className={`analysis-metric p-4 rounded-xl border transition-all duration-300 ${
             metrics.de_espaldas
               ? "bg-red-950/70 border-red-500 shadow-lg ring-1 ring-red-500"
               : "bg-gray-800 border-gray-700"
           }`}
         >
-          <div className="flex items-center justify-between mb-1">
-            <p className="text-xs uppercase tracking-wider font-semibold text-gray-400">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+            <p className="text-sm uppercase tracking-wider font-semibold text-gray-400">
               Orientación hacia la Cámara:
             </p>
             {metrics.de_espaldas && (
@@ -260,51 +268,51 @@ export default function CameraComponent({ stream: providedStream }: CameraCompon
             )}
           </div>
           <p
-            className="text-xl font-bold flex items-center gap-2"
+            className="text-2xl font-bold flex items-center gap-2"
             style={{ color: metrics.orientacion_color }}
           >
             {metrics.de_espaldas && <span>⚠️</span>}
             {metrics.orientacion}
           </p>
           {metrics.de_espaldas && (
-            <p className="text-xs text-red-300 mt-1">
+            <p className="analysis-note text-sm text-red-300 mt-1">
               Gira hacia el frente para no perder la conexión visual con los alumnos.
             </p>
           )}
         </div>
 
         {/* 2. Contacto Visual y Expresión Facial (Face Landmarker) */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="p-3.5 rounded-lg bg-gray-800 border border-gray-700">
-            <p className="text-xs text-gray-400 mb-1">Contacto Visual:</p>
+        <div className="analysis-pair grid grid-cols-1 min-[420px]:grid-cols-2 gap-3">
+          <div className="analysis-metric p-3.5 rounded-lg bg-gray-800 border border-gray-700">
+            <p className="text-sm text-gray-400 mb-1">Contacto Visual:</p>
             <p
-              className="text-base font-semibold"
+              className="text-2xl font-semibold"
               style={{ color: metrics.contacto_visual_color || "#22c55e" }}
             >
               {metrics.contacto_visual}
             </p>
           </div>
 
-          <div className="p-3.5 rounded-lg bg-gray-800 border border-gray-700">
-            <p className="text-xs text-gray-400 mb-1">Expresión Facial:</p>
-            <p className="text-base font-semibold text-amber-300">
+          <div className="analysis-metric p-3.5 rounded-lg bg-gray-800 border border-gray-700">
+            <p className="text-sm text-gray-400 mb-1">Expresión Facial:</p>
+            <p className="text-2xl font-semibold text-amber-300">
               {metrics.expresion}
             </p>
           </div>
         </div>
 
         {/* 3. Estado de Movilidad */}
-        <div className="p-4 rounded-lg bg-gray-800 border border-gray-700">
-          <p className="text-sm text-gray-400 mb-1">Dinamismo / Movilidad Corporal:</p>
-          <p className="text-xl font-bold" style={{ color: metrics.status_color }}>
+        <div className="analysis-metric p-4 rounded-lg bg-gray-800 border border-gray-700">
+          <p className="text-base text-gray-400 mb-1">Dinamismo / Movilidad Corporal:</p>
+          <p className="text-2xl font-bold" style={{ color: metrics.status_color }}>
             {metrics.movilidad}
           </p>
         </div>
 
         {/* 4. Uso de Gestos */}
-        <div className="p-4 rounded-lg bg-gray-800 border border-gray-700">
-          <p className="text-sm text-gray-400 mb-1">Uso de Gestos con las Manos:</p>
-          <p className="text-xl font-bold text-white">{metrics.gesticulacion}</p>
+        <div className="analysis-metric p-4 rounded-lg bg-gray-800 border border-gray-700">
+          <p className="text-base text-gray-400 mb-1">Uso de Gestos con las Manos:</p>
+          <p className="text-2xl font-bold text-white">{metrics.gesticulacion}</p>
         </div>
       </div>
     </div>
