@@ -1,12 +1,19 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 import cv2
+import json
 import numpy as np
 import mediapipe as mp
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python import BaseOptions
 import math
 import os
+
+from transcriber import TranscriptSession, transcribe_wav_bytes
+
+# The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
+active_transcripts = {}
 
 app = FastAPI()
 
@@ -54,6 +61,92 @@ def read_root():
         "service": "pose-and-face-analysis",
         "face_model_loaded": face_landmarker is not None
     }
+
+
+@app.websocket("/ws/transcription")
+async def websocket_transcription(websocket: WebSocket):
+    """Live subtitles for the camera recording. Audio arrives as WAV chunks."""
+    await websocket.accept()
+    print("[INFO] Transcripción conectada")
+    session = None
+    pending = None
+
+    async def reply_done():
+        await websocket.send_json({"type": "chunk-done"})
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            text_frame = message.get("text")
+            if text_frame:
+                try:
+                    payload = json.loads(text_frame)
+                except json.JSONDecodeError:
+                    continue
+
+                kind = payload.get("type")
+                if kind == "start":
+                    session = TranscriptSession(
+                        session_id=payload.get("sessionId", ""),
+                        candidate_name=payload.get("candidateName", ""),
+                        evaluator_name=payload.get("evaluatorName", ""),
+                        technology=payload.get("technology", ""),
+                        complexity=payload.get("complexity", ""),
+                    )
+                    active_transcripts[session.session_id] = session
+                    pending = None
+                    await websocket.send_json({"type": "ready", "sessionId": session.session_id})
+                elif kind == "chunk":
+                    pending = payload
+                elif kind == "stop":
+                    owns_session = (
+                        session is not None
+                        and active_transcripts.get(session.session_id) is session
+                    )
+                    saved = session.write() if owns_session else None
+                    await websocket.send_json({"type": "saved", **(saved or {"segments": []})})
+                    break
+                continue
+
+            audio = message.get("bytes")
+            if audio is None or session is None:
+                continue
+            if active_transcripts.get(session.session_id) is not session:
+                await reply_done()
+                continue
+
+            meta = pending or {}
+            pending = None
+            try:
+                spoken = await asyncio.to_thread(
+                    transcribe_wav_bytes, audio, session.prompt_context()
+                )
+            except Exception as exc:
+                print(f"[ERROR] Whisper: {exc}")
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "No se pudo transcribir ese fragmento.",
+                })
+                continue
+
+            if spoken:
+                segment = session.add(meta.get("start", 0), meta.get("end", 0), spoken)
+                if segment:
+                    print(f"[SUB] {segment['start']:.1f}s {segment['text']}", flush=True)
+                    await websocket.send_json({"type": "subtitle", **segment})
+                    continue
+            await reply_done()
+    except WebSocketDisconnect:
+        print("[INFO] Transcripción desconectada")
+    except Exception as exc:
+        print(f"[ERROR] Error en transcripción: {exc}")
+    finally:
+        if session is not None and active_transcripts.get(session.session_id) is session:
+            session.write()
+            active_transcripts.pop(session.session_id, None)
 
 @app.websocket("/ws/pose-analysis")
 async def websocket_pose_analysis(websocket: WebSocket):

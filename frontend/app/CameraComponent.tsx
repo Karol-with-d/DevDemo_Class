@@ -16,9 +16,18 @@ interface Metrics {
 interface CameraComponentProps {
   stream?: MediaStream | null;
   embedded?: boolean;
+  caption?: string;
+  previousCaption?: string;
+  captionStatus?: "connecting" | "live" | "saving" | "error";
 }
 
-export default function CameraComponent({ stream: providedStream, embedded = false }: CameraComponentProps) {
+export default function CameraComponent({
+  stream: providedStream,
+  embedded = false,
+  caption = "",
+  previousCaption = "",
+  captionStatus,
+}: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     movilidad: "Conectando al backend...",
@@ -210,7 +219,7 @@ export default function CameraComponent({ stream: providedStream, embedded = fal
             autoPlay
             playsInline
             muted
-            className="w-full h-full object-cover"
+            className="camera-feed w-full h-full object-cover"
           />
         )}
 
@@ -229,8 +238,37 @@ export default function CameraComponent({ stream: providedStream, embedded = fal
           </div>
         )}
 
+        {captionStatus && (
+          <>
+            <div className="absolute top-2 right-2 z-10 rounded-full border border-gray-700 bg-black/70 px-3 py-1 text-[11px] text-white backdrop-blur sm:top-3 sm:right-3 sm:text-xs">
+              {captionStatus === "live"
+                ? "Subtítulos en vivo"
+                : captionStatus === "saving"
+                  ? "Guardando subtítulos..."
+                  : captionStatus === "error"
+                    ? "Subtítulos no disponibles"
+                    : "Conectando subtítulos..."}
+            </div>
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-black/85 via-black/45 to-transparent px-4 pb-4 pt-12">
+              {previousCaption && (
+                <p className="mb-1 line-clamp-2 text-center text-xs text-white/70 sm:text-sm">{previousCaption}</p>
+              )}
+              <p className="line-clamp-3 text-center text-sm font-semibold text-white sm:text-lg">
+                {caption ||
+                  (captionStatus === "error"
+                    ? "No se pudo transcribir el audio de la cámara"
+                    : captionStatus === "saving"
+                      ? "Guardando lo que dijo el candidato..."
+                      : captionStatus === "connecting"
+                        ? "Conectando con Whisper..."
+                        : "Escuchando al candidato...")}
+              </p>
+            </div>
+          </>
+        )}
+
         {/* Status Badge */}
-        <div className="absolute top-2 left-2 sm:top-3 sm:left-3 max-w-[calc(100%-1rem)] bg-black/70 backdrop-blur px-3 py-1 rounded-full text-[11px] sm:text-xs flex items-center gap-2 z-10 border border-gray-700">
+        <div className="absolute top-2 left-2 sm:top-3 sm:left-3 max-w-[calc(100%-5.5rem)] bg-black/70 backdrop-blur px-3 py-1 rounded-full text-[11px] sm:text-xs flex items-center gap-2 z-10 border border-gray-700">
           <span
             className={`w-2.5 h-2.5 rounded-full ${
               backendConnected ? "bg-green-500 animate-pulse" : "bg-red-500"

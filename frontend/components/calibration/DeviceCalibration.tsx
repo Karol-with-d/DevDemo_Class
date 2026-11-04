@@ -5,7 +5,7 @@ import { CameraPreview } from './CameraPreview';
 import { AudioLevelIndicator } from './AudioLevelIndicator';
 
 interface DeviceCalibrationProps {
-  onCalibrationComplete: (stream: MediaStream) => void;
+  onCalibrationComplete: (stream: MediaStream, audioContext: AudioContext) => void;
 }
 
 export function DeviceCalibration({ onCalibrationComplete }: DeviceCalibrationProps) {
@@ -13,6 +13,7 @@ export function DeviceCalibration({ onCalibrationComplete }: DeviceCalibrationPr
   const [error, setError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
   const handedOff = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -51,6 +52,12 @@ export function DeviceCalibration({ onCalibrationComplete }: DeviceCalibrationPr
 
   const handleStartRecording = () => {
     if (!mediaStream) return;
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const context = audioContextRef.current ?? new AudioContextClass();
+    audioContextRef.current = context;
+    void context.resume();
     setCountdown(3);
   };
 
@@ -64,9 +71,9 @@ export function DeviceCalibration({ onCalibrationComplete }: DeviceCalibrationPr
       return () => clearTimeout(timer);
     }
 
-    if (countdown === 0 && mediaStream) {
+    if (countdown === 0 && mediaStream && audioContextRef.current && !handedOff.current) {
       handedOff.current = true;
-      onCalibrationComplete(mediaStream);
+      onCalibrationComplete(mediaStream, audioContextRef.current);
     }
   }, [countdown, mediaStream, onCalibrationComplete]);
 

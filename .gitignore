@@ -12,3 +12,6 @@ __pycache__/
 .env
 .env.*
 *.pem
+
+# Applicant speech captured during a recording
+recordings/
