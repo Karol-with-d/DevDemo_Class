@@ -21,7 +21,7 @@ export type CaptionStatus = "connecting" | "live" | "saving" | "error";
 
 const TARGET_RATE = 16000;
 const SILENCE_RMS = 0.01;
-const PAUSE_SECONDS = 0.6;
+const PAUSE_SECONDS = 0.4;
 const MIN_UTTERANCE_SECONDS = 1.5;
 const MAX_UTTERANCE_SECONDS = 8;
 

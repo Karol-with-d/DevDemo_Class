@@ -1,3 +1,21 @@
+import socket
+
+HOST = "127.0.0.1"
+PORT = 8000
+
+
+def _port_is_open(host, port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.4)
+        return sock.connect_ex((host, port)) == 0
+
+
+# npm run dev already starts this API. A second process used to load the
+# models and then crash with WinError 10048 because port 8000 was taken.
+if __name__ == "__main__" and _port_is_open(HOST, PORT):
+    print(f"Backend already running at http://{HOST}:{PORT}")
+    raise SystemExit(0)
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
@@ -386,4 +404,4 @@ if __name__ == "__main__":
     import uvicorn
     # One process, no reloader. The reloader binds port 8000 twice on Windows and
     # drops the socket whenever Visual Studio or Next.js writes files.
-    uvicorn.run(app, host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(app, host=HOST, port=PORT, reload=False)

@@ -85,7 +85,7 @@ def transcribe_loop(stop_event):
         loud = np.sqrt(np.mean(block ** 2)) > 0.01
         silence = 0 if loud else silence + len(block)
         seconds = len(buffer) / SAMPLE_RATE
-        paused = silence > SAMPLE_RATE * 0.6  # 0.6 s of quiet
+        paused = silence > SAMPLE_RATE * 0.4  # 0.4 s of quiet
         if (seconds > 1.5 and paused) or seconds > 8:
             text = send_to_whisper(buffer)
             if text:
