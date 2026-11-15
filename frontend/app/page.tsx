@@ -41,7 +41,7 @@ export default function Page() {
 
   useEffect(() => {
     if (step !== "finished" || !audioContext || audioContext.state === "closed") return;
-    void audioContext.close();
+    void audioContext.close().catch(() => undefined);
   }, [step, audioContext]);
 
   const handleSessionReady = (data: SessionData) => {
@@ -62,7 +62,12 @@ export default function Page() {
 
   const handleNewSession = () => {
     stream?.getTracks().forEach((track) => track.stop());
-    void audioContext?.close();
+    if (audioContext && audioContext.state !== "closed") {
+      void audioContext.close().catch(() => undefined);
+    }
+    if (savedTranscript?.videoUrl?.startsWith("blob:")) {
+      URL.revokeObjectURL(savedTranscript.videoUrl);
+    }
     setAudioContext(null);
     setStream(null);
     setSessionData(null);
@@ -100,7 +105,7 @@ export default function Page() {
         )}
 
         {step === "finished" && (
-          <div className="flex w-full max-w-xl flex-col items-center rounded-3xl border border-white/10 bg-[#11191e] p-8 text-center shadow-2xl sm:p-10">
+          <div className="flex w-full max-w-3xl flex-col items-center rounded-3xl border border-white/10 bg-[#11191e] p-8 text-center shadow-2xl sm:p-10">
             <div className="mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-[#9ce4c1]/10 text-2xl text-[#9ce4c1] shadow-[0_0_20px_rgba(156,228,193,0.2)]">
               ✓
             </div>
@@ -108,6 +113,19 @@ export default function Page() {
             <p className="mb-6 text-sm text-[#82918f]">
               Los subtítulos de {sessionData?.candidateName} quedaron guardados con el momento en que habló.
             </p>
+            {savedTranscript?.videoUrl ? (
+              <video
+                className="mb-6 aspect-video w-full rounded-2xl bg-black"
+                src={savedTranscript.videoUrl}
+                controls
+                playsInline
+                preload="auto"
+              />
+            ) : (
+              <p className="mb-6 text-sm text-[#82918f]">
+                El video no se pudo subir. Los subtítulos sí quedaron guardados.
+              </p>
+            )}
             <div className="mb-6 max-h-64 w-full overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4 text-left">
               {savedTranscript?.segments.length ? (
                 <ul className="flex flex-col gap-3">

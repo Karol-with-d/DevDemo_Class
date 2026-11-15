@@ -15,6 +15,7 @@ export interface TranscriptSaveResult {
   vttPath: string | null;
   txtPath: string | null;
   docxPath: string | null;
+  videoUrl?: string | null;
 }
 
 export type CaptionStatus = "connecting" | "live" | "saving" | "error";
@@ -48,7 +49,7 @@ interface Engine {
 }
 
 function emptyResult(segments: TranscriptSegment[]): TranscriptSaveResult {
-  return { segments, jsonPath: null, vttPath: null, txtPath: null, docxPath: null };
+  return { segments, jsonPath: null, vttPath: null, txtPath: null, docxPath: null, videoUrl: null };
 }
 
 function downsample(input: Float32Array, inputRate: number, outputRate: number) {
@@ -327,7 +328,9 @@ export function useLiveTranscript(
       processor.disconnect();
       gain.disconnect();
       source.disconnect();
-      if (ownsContext) void context.close();
+      if (ownsContext && context.state !== "closed") {
+        void context.close().catch(() => undefined);
+      }
       if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
         socket.close();
       }

@@ -1,10 +1,23 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { uploadRecording } from '../../lib/api';
 import { SessionData } from '../session/SessionForm';
 import { DynamicTimer } from './DynamicTimer';
 import { TranscriptSaveResult, useLiveTranscript } from './useLiveTranscript';
+
+function recorderOptions(): MediaRecorderOptions | undefined {
+  if (typeof MediaRecorder === 'undefined') return undefined;
+  const types = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9,opus',
+    'video/webm',
+    'video/mp4',
+  ];
+  const mimeType = types.find((type) => MediaRecorder.isTypeSupported(type));
+  return mimeType ? { mimeType } : undefined;
+}
 
 const CameraComponent = dynamic(() => import('../../app/CameraComponent'), {
   ssr: false,
@@ -29,14 +42,67 @@ export function SplitRecordingInterface({
   const [isRecording, setIsRecording] = useState<boolean>(true);
   const [stopping, setStopping] = useState(false);
   const live = useLiveTranscript(stream, session, audioContext);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    if (!stream || typeof MediaRecorder === 'undefined') return;
+
+    chunksRef.current = [];
+    let recorder: MediaRecorder;
+    try {
+      recorder = new MediaRecorder(stream, recorderOptions());
+    } catch (error) {
+      console.error('MediaRecorder no disponible:', error);
+      return;
+    }
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunksRef.current.push(event.data);
+    };
+    recorder.start(1000);
+    recorderRef.current = recorder;
+
+    return () => {
+      recorderRef.current = null;
+      recorder.ondataavailable = null;
+      if (recorder.state !== 'inactive') recorder.stop();
+    };
+  }, [stream]);
+
+  const collectRecording = () =>
+    new Promise<Blob | null>((resolve) => {
+      const recorder = recorderRef.current;
+      const toBlob = () => {
+        const type = recorder?.mimeType || 'video/webm';
+        const blob = new Blob(chunksRef.current, { type });
+        resolve(blob.size > 0 ? blob : null);
+      };
+      if (!recorder || recorder.state === 'inactive') {
+        toBlob();
+        return;
+      }
+      recorder.onstop = toBlob;
+      recorder.stop();
+    });
 
   const handleStopRecording = async () => {
     if (stopping) return;
     setStopping(true);
     setIsRecording(false);
+    const blob = await collectRecording();
     const saved = await live.finish();
+    let videoUrl: string | null = blob ? URL.createObjectURL(blob) : null;
+    if (blob) {
+      try {
+        const remoteUrl = await uploadRecording(blob, session.sessionId);
+        if (!videoUrl) videoUrl = remoteUrl;
+      } catch (error) {
+        console.error('No se pudo subir el video:', error);
+      }
+    }
     stream?.getTracks().forEach((track) => track.stop());
-    onStopRecording?.(saved);
+    onStopRecording?.({ ...saved, videoUrl });
   };
 
   return (
@@ -69,7 +135,7 @@ export function SplitRecordingInterface({
           className="stop-button"
         >
           <span className="stop-icon"></span>
-          {stopping ? 'Guardando subtítulos...' : 'Detener Grabación y Finalizar'}
+          {stopping ? 'Guardando grabación...' : 'Detener Grabación y Finalizar'}
         </button>
       </div>
     </div>

@@ -16,19 +16,16 @@ if __name__ == "__main__" and _port_is_open(HOST, PORT):
     print(f"Backend already running at http://{HOST}:{PORT}")
     raise SystemExit(0)
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import asyncio
-import cv2
 import json
-import numpy as np
-import mediapipe as mp
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python import BaseOptions
 import math
 import os
 
 from transcriber import TranscriptSession, transcribe_wav_bytes
+from s3_storage import read_video_object, upload_video_bytes
 
 # The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
 active_transcripts = {}
@@ -44,41 +41,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Inicializar MediaPipe Models
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 1. Pose Landmarker
-possible_pose_models = ["pose_landmarker_heavy.task", "pose_landmarker_full.task", "pose_landmarker_lite.task"]
-pose_model_path = next((os.path.join(script_dir, m) for m in possible_pose_models if os.path.exists(os.path.join(script_dir, m))), None)
-
-pose_options = vision.PoseLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path=pose_model_path),
-    running_mode=vision.RunningMode.IMAGE
-)
-pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
-
-# 2. Face Landmarker (métricas faciales y orientación)
-face_model_path = os.path.join(script_dir, "face_landmarker.task")
+cv2 = None
+np = None
+mp = None
+pose_landmarker = None
 face_landmarker = None
-if os.path.exists(face_model_path):
-    face_options = vision.FaceLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=face_model_path),
-        running_mode=vision.RunningMode.IMAGE,
-        min_face_detection_confidence=0.3,
-        min_face_presence_confidence=0.3,
-        min_tracking_confidence=0.3,
-        output_face_blendshapes=True,
-        num_faces=1
+
+try:
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+    from mediapipe.tasks.python import vision
+    from mediapipe.tasks.python import BaseOptions
+except Exception as exc:
+    print(f"[WARN] OpenCV no se pudo cargar: {exc}")
+else:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    possible_pose_models = [
+        "pose_landmarker_heavy.task",
+        "pose_landmarker_full.task",
+        "pose_landmarker_lite.task",
+    ]
+    pose_model_path = next(
+        (
+            os.path.join(script_dir, name)
+            for name in possible_pose_models
+            if os.path.exists(os.path.join(script_dir, name))
+        ),
+        None,
     )
-    face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
+    try:
+        if pose_model_path:
+            pose_options = vision.PoseLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=pose_model_path),
+                running_mode=vision.RunningMode.IMAGE,
+            )
+            pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
+        face_model_path = os.path.join(script_dir, "face_landmarker.task")
+        if os.path.exists(face_model_path):
+            face_options = vision.FaceLandmarkerOptions(
+                base_options=BaseOptions(model_asset_path=face_model_path),
+                running_mode=vision.RunningMode.IMAGE,
+                min_face_detection_confidence=0.3,
+                min_face_presence_confidence=0.3,
+                min_tracking_confidence=0.3,
+                output_face_blendshapes=True,
+                num_faces=1,
+            )
+            face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
+    except Exception as exc:
+        print(f"[WARN] Modelos MediaPipe no se pudieron cargar: {exc}")
 
 @app.get("/")
 def read_root():
     return {
         "status": "ok",
         "service": "pose-and-face-analysis",
-        "face_model_loaded": face_landmarker is not None
+        "face_model_loaded": face_landmarker is not None,
+        "pose_model_loaded": pose_landmarker is not None,
     }
+
+
+@app.post("/upload-video")
+async def upload_video(
+    file: UploadFile = File(...),
+    sessionId: str = Form(""),
+):
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="El archivo de video está vacío.")
+    try:
+        result = await asyncio.to_thread(
+            upload_video_bytes,
+            data,
+            sessionId,
+            file.content_type or "video/webm",
+            file.filename or "recording.webm",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[ERROR] Subida a S3: {exc}")
+        raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
+    return result
+
+
+@app.get("/video")
+async def play_video(key: str):
+    try:
+        data, content_type = await asyncio.to_thread(read_video_object, key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
+    )
 
 
 @app.websocket("/ws/transcription")
@@ -88,6 +146,7 @@ async def websocket_transcription(websocket: WebSocket):
     print("[INFO] Transcripción conectada")
     session = None
     pending = None
+    whisper_auth_failed = False
 
     async def reply_done():
         await websocket.send_json({"type": "chunk-done"})
@@ -138,16 +197,27 @@ async def websocket_transcription(websocket: WebSocket):
 
             meta = pending or {}
             pending = None
+            if whisper_auth_failed:
+                await reply_done()
+                continue
             try:
                 spoken = await asyncio.to_thread(
                     transcribe_wav_bytes, audio, session.prompt_context()
                 )
             except Exception as exc:
                 print(f"[ERROR] Whisper: {exc}")
-                await websocket.send_json({
-                    "type": "error",
-                    "message": "No se pudo transcribir ese fragmento.",
-                })
+                detail = str(exc)
+                if "401" in detail or "expired" in detail.lower() or "invalid_api_key" in detail.lower():
+                    whisper_auth_failed = True
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "La clave de OpenAI expiró. Actualiza OPENAI_API_KEY en el archivo .env.",
+                    })
+                else:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "No se pudo transcribir ese fragmento.",
+                    })
                 continue
 
             if spoken:
@@ -170,6 +240,27 @@ async def websocket_transcription(websocket: WebSocket):
 async def websocket_pose_analysis(websocket: WebSocket):
     await websocket.accept()
     print("[INFO] Cliente conectado via WebSocket")
+
+    if cv2 is None or np is None:
+        print("[WARN] Análisis de pose omitido: OpenCV/MediaPipe no disponible")
+        unavailable = {
+            "movilidad": "OpenCV/MediaPipe no disponible",
+            "gesticulacion": "OpenCV/MediaPipe no disponible",
+            "status_color": "#9ca3af",
+            "orientacion": "OpenCV/MediaPipe no disponible",
+            "orientacion_color": "#9ca3af",
+            "de_espaldas": False,
+            "expresion": "OpenCV/MediaPipe no disponible",
+            "contacto_visual": "OpenCV/MediaPipe no disponible",
+            "contacto_visual_color": "#9ca3af",
+        }
+        try:
+            while True:
+                await websocket.receive()
+                await websocket.send_json(unavailable)
+        except WebSocketDisconnect:
+            print("[INFO] Cliente desconectado del WebSocket")
+        return
 
     prev_center_x, prev_center_y = None, None
     smooth_center_x, smooth_center_y = None, None
@@ -199,7 +290,7 @@ async def websocket_pose_analysis(websocket: WebSocket):
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
             # Ejecutar inferencia para pose y rostro
-            pose_result = pose_landmarker.detect(mp_image)
+            pose_result = pose_landmarker.detect(mp_image) if pose_landmarker else None
             face_result = face_landmarker.detect(mp_image) if face_landmarker else None
 
             # Valores por defecto
