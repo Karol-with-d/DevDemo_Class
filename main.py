@@ -75,6 +75,11 @@ else:
             pose_options = vision.PoseLandmarkerOptions(
                 base_options=BaseOptions(model_asset_path=pose_model_path),
                 running_mode=vision.RunningMode.IMAGE,
+                # 0.2 keeps the body when the teacher turns away. Only the
+                # back-facing warning confirms quickly; other signals stay slow.
+                min_pose_detection_confidence=0.2,
+                min_pose_presence_confidence=0.2,
+                min_tracking_confidence=0.2,
             )
             pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
         face_model_path = os.path.join(script_dir, "face_landmarker.task")
@@ -266,9 +271,12 @@ async def websocket_pose_analysis(websocket: WebSocket):
     smooth_center_x, smooth_center_y = None, None
     historial_movimiento = []
     historial_espaldas = []
+    espalda_activa = False
     frames_sin_pose = 0
     VENTANA_FRAMES = 90
     MIN_MUESTRAS_MOVIMIENTO = 30
+    # About three camera frames. One noisy frame must not raise the banner.
+    VENTANA_ESPALDAS = 4
     # Pose landmarks jitter while the teacher stands still. Movement has to clear
     # that noise, and a one-frame leap is a bad detection, not walking.
     UMBRAL_MOVIMIENTO = 0.10
@@ -333,12 +341,17 @@ async def websocket_pose_analysis(websocket: WebSocket):
                 elif (not face_detected) and nose_behind_ears and shoulders_visible:
                     frame_de_espaldas = True
 
-                # Suavizado de detección
+                # Confirm a real turn in a few frames, then hold until they face forward.
                 historial_espaldas.append(1 if frame_de_espaldas else 0)
-                if len(historial_espaldas) > 10:
+                if len(historial_espaldas) > VENTANA_ESPALDAS:
                     historial_espaldas.pop(0)
 
-                de_espaldas_confirmado = (sum(historial_espaldas) / len(historial_espaldas)) >= 0.4
+                votos_espaldas = sum(historial_espaldas)
+                if not espalda_activa and len(historial_espaldas) >= 3 and votos_espaldas >= 3:
+                    espalda_activa = True
+                elif espalda_activa and votos_espaldas <= 1:
+                    espalda_activa = False
+                de_espaldas_confirmado = espalda_activa
 
                 if de_espaldas_confirmado:
                     es_de_espaldas = True
@@ -412,6 +425,8 @@ async def websocket_pose_analysis(websocket: WebSocket):
                     prev_center_x, prev_center_y = None, None
                     smooth_center_x, smooth_center_y = None, None
                     historial_movimiento.clear()
+                    historial_espaldas.clear()
+                    espalda_activa = False
 
             # --- 4. MÉTRICAS FACIALES Y CONTACTO VISUAL ---
             if es_de_espaldas:
