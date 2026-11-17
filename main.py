@@ -82,6 +82,11 @@ else:
             pose_options = vision.PoseLandmarkerOptions(
                 base_options=BaseOptions(model_asset_path=pose_model_path),
                 running_mode=vision.RunningMode.IMAGE,
+                # 0.2 keeps the body when the teacher turns away. Only the
+                # back-facing warning confirms quickly; other signals stay slow.
+                min_pose_detection_confidence=0.2,
+                min_pose_presence_confidence=0.2,
+                min_tracking_confidence=0.2,
             )
             pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
         face_model_path = os.path.join(script_dir, "face_landmarker.task")
@@ -93,6 +98,7 @@ else:
                 min_face_presence_confidence=0.3,
                 min_tracking_confidence=0.3,
                 output_face_blendshapes=True,
+                output_facial_transformation_matrixes=True,
                 num_faces=1,
             )
             face_landmarker = vision.FaceLandmarker.create_from_options(face_options)
@@ -286,6 +292,65 @@ async def websocket_transcription(websocket: WebSocket):
             session.write()
             active_transcripts.pop(session.session_id, None)
 
+def _giro_desde_rostro(landmarks, matrix=None):
+    """Head turn from the face mesh. Finding a face is not the same as facing the camera."""
+    if matrix is not None:
+        # About 26 degrees. A profile like the screenshots is well past this.
+        yaw = math.atan2(float(matrix[0][2]), float(matrix[2][2]))
+        if abs(yaw) >= 0.45:
+            return "perfil"
+    if not landmarks or len(landmarks) < 455:
+        return None
+    nose = landmarks[1]
+    left_eye, right_eye = landmarks[33], landmarks[263]
+    left_cheek, right_cheek = landmarks[234], landmarks[454]
+    chin = landmarks[152]
+    width = max(abs(right_cheek.x - left_cheek.x), 1e-4)
+    yaw = abs(nose.x - (left_cheek.x + right_cheek.x) / 2.0) / width
+    depth = abs(left_cheek.z - right_cheek.z)
+    eye_span = max(abs(right_eye.x - left_eye.x), 1e-4)
+    pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / eye_span
+    if yaw >= 0.30 or depth >= 0.08 or (yaw >= 0.20 and depth >= 0.045):
+        return "perfil"
+    if pitch >= 2.0 or nose.y >= 0.86 or chin.y >= 0.97:
+        return "abajo"
+    return None
+
+
+def _giro_desde_pose(landmarks):
+    """Backup when the face mesh drops: profile ears, or the head sunk to the frame edge."""
+    if not landmarks or len(landmarks) < 9:
+        return None
+    nose = landmarks[0]
+    left_eye, right_eye = landmarks[2], landmarks[5]
+    left_ear, right_ear = landmarks[7], landmarks[8]
+    if nose.y >= 0.82 or (
+        left_eye.visibility > 0.3
+        and right_eye.visibility > 0.3
+        and left_eye.y >= 0.75
+        and right_eye.y >= 0.75
+    ):
+        return "abajo"
+    if left_eye.visibility > 0.3 and right_eye.visibility > 0.3:
+        span = max(abs(left_eye.x - right_eye.x), 0.015)
+        pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / span
+        if pitch >= 2.4:
+            return "abajo"
+    if left_ear.visibility > 0.45 and right_ear.visibility > 0.45 and nose.visibility > 0.35:
+        span = max(abs(left_ear.x - right_ear.x), 1e-4)
+        asym = abs(abs(nose.x - left_ear.x) - abs(nose.x - right_ear.x)) / span
+        if asym >= 0.85:
+            return "perfil"
+    return None
+
+
+_MENSAJE_GIRO = {
+    "espaldas": ("¡Atención! De espaldas a la cámara", "Sin contacto visual (De espaldas)"),
+    "perfil": ("De perfil: no mira a la cámara", "Sin contacto visual (De perfil)"),
+    "abajo": ("Cabeza baja o fuera de cuadro", "Sin contacto visual (Cabeza baja)"),
+}
+
+
 @app.websocket("/ws/pose-analysis")
 async def websocket_pose_analysis(websocket: WebSocket):
     await websocket.accept()
@@ -316,9 +381,13 @@ async def websocket_pose_analysis(websocket: WebSocket):
     smooth_center_x, smooth_center_y = None, None
     historial_movimiento = []
     historial_espaldas = []
+    espalda_activa = False
+    motivo_sostenido = None
     frames_sin_pose = 0
     VENTANA_FRAMES = 90
     MIN_MUESTRAS_MOVIMIENTO = 30
+    # About three camera frames. One noisy frame must not raise the banner.
+    VENTANA_ESPALDAS = 4
     # Pose landmarks jitter while the teacher stands still. Movement has to clear
     # that noise, and a one-frame leap is a bad detection, not walking.
     UMBRAL_MOVIMIENTO = 0.10
@@ -357,6 +426,7 @@ async def websocket_pose_analysis(websocket: WebSocket):
 
             pose_detected = pose_result and pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0
             face_detected = face_result and face_result.face_landmarks and len(face_result.face_landmarks) > 0
+            frame_de_espaldas = False
 
             if pose_detected:
                 landmarks = pose_result.pose_landmarks[0]
@@ -377,35 +447,10 @@ async def websocket_pose_analysis(websocket: WebSocket):
                 # Comprobación de profundidad relativa de la nariz
                 nose_behind_ears = (nose.z > left_ear.z and nose.z > right_ear.z) or (nose.visibility < 0.25)
 
-                frame_de_espaldas = False
                 if shoulders_visible and shoulder_diff < -0.04:
                     frame_de_espaldas = True
                 elif (not face_detected) and nose_behind_ears and shoulders_visible:
                     frame_de_espaldas = True
-
-                # Suavizado de detección
-                historial_espaldas.append(1 if frame_de_espaldas else 0)
-                if len(historial_espaldas) > 10:
-                    historial_espaldas.pop(0)
-
-                de_espaldas_confirmado = (sum(historial_espaldas) / len(historial_espaldas)) >= 0.4
-
-                if de_espaldas_confirmado:
-                    es_de_espaldas = True
-                    alerta_orientacion = "¡Atención! De espaldas a la cámara"
-                    color_orientacion = "#ef4444" # Rojo
-                elif face_detected:
-                    es_de_espaldas = False
-                    alerta_orientacion = "Frente a la audiencia"
-                    color_orientacion = "#22c55e" # Verde
-                elif abs(shoulder_diff) < 0.08:
-                    es_de_espaldas = False
-                    alerta_orientacion = "De perfil (Giro parcial)"
-                    color_orientacion = "#eab308" # Amarillo
-                else:
-                    es_de_espaldas = False
-                    alerta_orientacion = "Frente a la audiencia"
-                    color_orientacion = "#22c55e" # Verde
 
                 # --- 2. EVALUACIÓN DE GESTOS ---
                 altura_cadera = (hip_left.y + hip_right.y) / 2 if (hip_left.visibility > 0.3 and hip_right.visibility > 0.3) else 0.85
@@ -462,13 +507,66 @@ async def websocket_pose_analysis(websocket: WebSocket):
                     prev_center_x, prev_center_y = None, None
                     smooth_center_x, smooth_center_y = None, None
                     historial_movimiento.clear()
+                    if not face_detected:
+                        historial_espaldas.clear()
+                        espalda_activa = False
+                        motivo_sostenido = None
+
+            # A face mesh used to force "facing the audience". Profile and a head
+            # dropped to the bottom of the frame are the cases that must alert.
+            matriz_rostro = None
+            if face_detected and getattr(face_result, "facial_transformation_matrixes", None):
+                matriz_rostro = face_result.facial_transformation_matrixes[0]
+            giro_rostro = _giro_desde_rostro(face_result.face_landmarks[0], matriz_rostro) if face_detected else None
+            giro_pose = _giro_desde_pose(landmarks) if pose_detected else None
+            if frame_de_espaldas:
+                motivo_frame = "espaldas"
+            elif giro_rostro:
+                motivo_frame = giro_rostro
+            elif giro_pose:
+                motivo_frame = giro_pose
+            else:
+                motivo_frame = None
+
+            if pose_detected or face_detected:
+                historial_espaldas.append(1 if motivo_frame else 0)
+                if len(historial_espaldas) > VENTANA_ESPALDAS:
+                    historial_espaldas.pop(0)
+                votos_espaldas = sum(historial_espaldas)
+                if not espalda_activa and len(historial_espaldas) >= 3 and votos_espaldas >= 3:
+                    espalda_activa = True
+                elif espalda_activa and votos_espaldas <= 1:
+                    espalda_activa = False
+                    if not motivo_frame:
+                        motivo_sostenido = None
+                if motivo_frame:
+                    motivo_sostenido = motivo_frame
+
+            motivo_visible = motivo_frame or (motivo_sostenido if espalda_activa else None)
+            if espalda_activa and motivo_visible:
+                es_de_espaldas = True
+                alerta_orientacion = _MENSAJE_GIRO[motivo_visible][0]
+                color_orientacion = "#ef4444"
+            elif motivo_visible == "perfil":
+                alerta_orientacion = "De perfil (Giro parcial)"
+                color_orientacion = "#eab308"
+            elif motivo_visible == "abajo":
+                alerta_orientacion = "Cabeza baja o fuera de cuadro"
+                color_orientacion = "#eab308"
+            elif motivo_visible == "espaldas":
+                alerta_orientacion = "Girando de espaldas..."
+                color_orientacion = "#eab308"
+            elif face_detected or pose_detected:
+                alerta_orientacion = "Frente a la audiencia"
+                color_orientacion = "#22c55e"
 
             # --- 4. MÉTRICAS FACIALES Y CONTACTO VISUAL ---
-            if es_de_espaldas:
-                alerta_contacto = "Sin contacto visual (De espaldas)"
-                color_contacto = "#ef4444" # Rojo
-                alerta_expresion = "No visible (De espaldas)"
-            elif face_detected and face_result.face_blendshapes and len(face_result.face_blendshapes) > 0:
+            if motivo_visible:
+                alerta_contacto = _MENSAJE_GIRO[motivo_visible][1]
+                color_contacto = "#ef4444" if espalda_activa else "#eab308"
+                if motivo_visible == "espaldas":
+                    alerta_expresion = "No visible (De espaldas)"
+            if motivo_visible != "espaldas" and face_detected and face_result.face_blendshapes and len(face_result.face_blendshapes) > 0:
                 blendshapes = {b.category_name: b.score for b in face_result.face_blendshapes[0]}
 
                 # Sonrisa y amabilidad
@@ -487,15 +585,18 @@ async def websocket_pose_analysis(websocket: WebSocket):
                 mira_arriba = blendshapes.get("eyeLookUpLeft", 0) > 0.65 and blendshapes.get("eyeLookUpRight", 0) > 0.65
                 mira_abajo = blendshapes.get("eyeLookDownLeft", 0) > 0.75 and blendshapes.get("eyeLookDownRight", 0) > 0.75
 
-                if ojos_cerrados:
-                    alerta_contacto = "Ojos cerrados"
-                    color_contacto = "#eab308" # Amarillo
-                elif mira_izq or mira_der or mira_arriba or mira_abajo:
-                    alerta_contacto = "Mirada desviada"
-                    color_contacto = "#eab308" # Amarillo
-                else:
-                    alerta_contacto = "Contacto visual directo"
-                    color_contacto = "#22c55e" # Verde
+                if not motivo_visible:
+                    if ojos_cerrados:
+                        alerta_contacto = "Ojos cerrados"
+                        color_contacto = "#eab308" # Amarillo
+                    elif mira_izq or mira_der or mira_arriba or mira_abajo:
+                        alerta_contacto = "Mirada desviada"
+                        color_contacto = "#eab308" # Amarillo
+                    else:
+                        alerta_contacto = "Contacto visual directo"
+                        color_contacto = "#22c55e" # Verde
+            elif motivo_visible:
+                pass
             elif pose_detected:
                 # Fallback con Pose Landmarker (cuando FaceLandmarker no detecta por distancia o luz)
                 eye_left, eye_right = landmarks[2], landmarks[5]
