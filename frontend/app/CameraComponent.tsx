@@ -229,7 +229,7 @@ export default function CameraComponent({
             <span className="text-2xl sm:text-3xl leading-none">⚠️</span>
             <div className="min-w-0">
               <p className="font-extrabold text-sm tracking-wide">
-                ¡ALERTA: ESTÁS DE ESPALDAS!
+                {metrics.orientacion}
               </p>
               <p className="text-xs text-red-100">
                 El docente debe mantener la vista hacia la cámara y los estudiantes en todo momento.
