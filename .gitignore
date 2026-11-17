@@ -13,5 +13,5 @@ __pycache__/
 .env.*
 *.pem
 
-# Applicant speech captured during a recording
-recordings/
+# Applicant speech captured during a recording (repo root only)
+/recordings/

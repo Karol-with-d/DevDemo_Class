@@ -93,16 +93,18 @@ export function SplitRecordingInterface({
     const blob = await collectRecording();
     const saved = await live.finish();
     let videoUrl: string | null = blob ? URL.createObjectURL(blob) : null;
+    let videoKey: string | null = null;
     if (blob) {
       try {
-        const remoteUrl = await uploadRecording(blob, session.sessionId);
-        if (!videoUrl) videoUrl = remoteUrl;
+        const uploaded = await uploadRecording(blob, session.sessionId);
+        videoKey = uploaded.key;
+        if (!videoUrl) videoUrl = uploaded.playbackUrl;
       } catch (error) {
         console.error('No se pudo subir el video:', error);
       }
     }
     stream?.getTracks().forEach((track) => track.stop());
-    onStopRecording?.({ ...saved, videoUrl });
+    onStopRecording?.({ ...saved, videoUrl, videoKey });
   };
 
   return (

@@ -2,6 +2,7 @@ import io
 import json
 import os
 import queue
+import shutil
 import threading
 from datetime import datetime
 
@@ -33,17 +34,16 @@ def on_audio(indata, frames, time, status):
     audio_q.put(indata.copy())
 
 
-def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None):
+def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
     samples = np.asarray(samples, dtype=np.float32)
     if samples.ndim > 1:
         samples = samples.mean(axis=1)
     if samples.size == 0:
         return ""
     volume = float(np.sqrt(np.mean(samples ** 2)))
-    if volume < 0.01:  # silence, don't send it
+    if volume < 0.012:
         return ""
-    if context is None:
-        context = " ".join(full_text[-3:])
+    previous = _as_previous(context if context is not None else full_text[-2:])
     buf = io.BytesIO()
     sf.write(buf, samples, sample_rate, format="WAV")
     buf.name = "chunk.wav"
@@ -52,14 +52,36 @@ def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None):
         model="gpt-4o-mini-transcribe",
         file=buf,
         language="es",
-        prompt=("Clase en español. " + context)[-500:],
+        prompt=(style_prompt or "Transcripción en español. Solo el audio de este fragmento.")[:500],
     )
-    return _without_prompt_echo(result.text)
+    text = _without_prompt_echo(result.text)
+    if _is_repeat_or_junk(text, previous):
+        return ""
+    return text
+
+
+def _as_previous(context):
+    if not context:
+        return []
+    if isinstance(context, str):
+        return [context] if context.strip() else []
+    return [item for item in context if item]
+
+
+def _normalize_caption(text):
+    return " ".join((text or "").lower().split())
 
 
 def _without_prompt_echo(text):
     """A hum or empty room sometimes comes back as the prompt itself."""
     cleaned = " ".join((text or "").split())
+    lowered = _normalize_caption(cleaned)
+    for prefix in ("clase en español.", "clase en español", "transcripción en español."):
+        if lowered.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip(" .")
+            lowered = _normalize_caption(cleaned)
+    if not cleaned:
+        return ""
     pieces = [piece.strip(" .¡!¿?").lower() for piece in cleaned.split(".")]
     pieces = [piece for piece in pieces if piece]
     if pieces and all(piece == "clase en español" for piece in pieces):
@@ -67,10 +89,43 @@ def _without_prompt_echo(text):
     return cleaned
 
 
-def transcribe_wav_bytes(data, context=""):
+def _is_repeat_or_junk(text, previous):
+    normalized = _normalize_caption(text)
+    if len(normalized) < 3:
+        return True
+    junk = (
+        "gracias por ver",
+        "subtítulos realizados",
+        "amara.org",
+        "música de fondo",
+        "aplausos",
+        "like y suscríbete",
+    )
+    if any(item in normalized for item in junk):
+        return True
+    last = _normalize_caption(previous[-1] if previous else "")
+    if not last:
+        return False
+    if normalized == last:
+        return True
+    if last in normalized or normalized in last:
+        return True
+    words_a, words_b = set(normalized.split()), set(last.split())
+    if not words_a or not words_b:
+        return False
+    overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
+    return overlap >= 0.8
+
+
+def transcribe_wav_bytes(data, context="", style_prompt=None):
     incoming = io.BytesIO(data)
     samples, sample_rate = sf.read(incoming, dtype="float32", always_2d=False)
-    return send_to_whisper(samples, int(sample_rate), context=context)
+    return send_to_whisper(
+        samples,
+        int(sample_rate),
+        context=context,
+        style_prompt=style_prompt,
+    )
 
 
 def transcribe_loop(stop_event):
@@ -154,15 +209,25 @@ class TranscriptSession:
         self.technology = technology or ""
         self.complexity = complexity or ""
         self.segments = []
+        self.video_key = None
         self.directory = os.path.join(RECORDINGS_DIR, self.session_id)
         os.makedirs(self.directory, exist_ok=True)
 
     def prompt_context(self):
-        return " ".join(segment["text"] for segment in self.segments[-3:])
+        return [segment["text"] for segment in self.segments[-2:]]
+
+    def style_prompt(self):
+        parts = ["Transcripción en español de una evaluación técnica. Solo este fragmento."]
+        if self.technology:
+            parts.append(f"Tema: {self.technology}.")
+        return " ".join(parts)
 
     def add(self, start, end, text):
         spoken = " ".join((text or "").split())
         if not spoken:
+            return None
+        previous = [segment["text"] for segment in self.segments[-2:]]
+        if _is_repeat_or_junk(spoken, previous):
             return None
         start = max(0.0, float(start))
         end = max(start + 0.3, float(end))
@@ -180,6 +245,8 @@ class TranscriptSession:
             "complexity": self.complexity,
             "savedAt": datetime.now().isoformat(timespec="seconds"),
             "segments": self.segments,
+            "videoKey": self.video_key,
+            "savedInSystem": bool(self.video_key),
         }
         json_path = os.path.join(self.directory, "transcript.json")
         vtt_path = os.path.join(self.directory, "transcript.vtt")
@@ -244,6 +311,83 @@ class TranscriptSession:
         for segment in self.segments:
             doc.add_paragraph(f"[{clock_label(segment['start'])}] {segment['text']}")
         doc.save(path)
+
+
+def _session_json_path(session_id):
+    return os.path.join(RECORDINGS_DIR, safe_session_id(session_id), "transcript.json")
+
+
+def load_session_record(session_id):
+    path = _session_json_path(session_id)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def attach_video_key(session_id, video_key):
+    session_id = safe_session_id(session_id)
+    directory = os.path.join(RECORDINGS_DIR, session_id)
+    os.makedirs(directory, exist_ok=True)
+    path = _session_json_path(session_id)
+    payload = load_session_record(session_id) or {
+        "sessionId": session_id,
+        "candidateName": "Candidato",
+        "evaluatorName": "",
+        "technology": "",
+        "complexity": "",
+        "segments": [],
+    }
+    payload["sessionId"] = session_id
+    payload["videoKey"] = video_key
+    payload["savedInSystem"] = True
+    payload["savedAt"] = payload.get("savedAt") or datetime.now().isoformat(timespec="seconds")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
+def list_saved_recordings():
+    items = []
+    if not os.path.isdir(RECORDINGS_DIR):
+        return items
+    for name in os.listdir(RECORDINGS_DIR):
+        payload = load_session_record(name)
+        if not payload or not isinstance(payload, dict):
+            continue
+        items.append(
+            {
+                "sessionId": payload.get("sessionId") or name,
+                "candidateName": payload.get("candidateName") or "Candidato",
+                "evaluatorName": payload.get("evaluatorName") or "",
+                "technology": payload.get("technology") or "",
+                "complexity": payload.get("complexity") or "",
+                "savedAt": payload.get("savedAt") or "",
+                "videoKey": payload.get("videoKey"),
+                "savedInSystem": bool(payload.get("videoKey")),
+                "segmentCount": len(payload.get("segments") or []),
+            }
+        )
+    items.sort(key=lambda item: item.get("savedAt") or "", reverse=True)
+    return items
+
+
+def delete_local_session(session_id):
+    directory = os.path.join(RECORDINGS_DIR, safe_session_id(session_id))
+    if not os.path.isdir(directory):
+        return
+    json_path = os.path.join(directory, "transcript.json")
+    # Drop the catalog entry first so the library hides the session even if
+    # OneDrive/Windows still locks the folder (WinError 5 on rmdir).
+    if os.path.isfile(json_path):
+        try:
+            os.remove(json_path)
+        except OSError:
+            try:
+                os.replace(json_path, json_path + ".deleted")
+            except OSError:
+                pass
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 if __name__ == "__main__":

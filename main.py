@@ -24,8 +24,15 @@ import json
 import math
 import os
 
-from transcriber import TranscriptSession, transcribe_wav_bytes
-from s3_storage import read_video_object, upload_video_bytes
+from transcriber import (
+    TranscriptSession,
+    attach_video_key,
+    delete_local_session,
+    list_saved_recordings,
+    load_session_record,
+    transcribe_wav_bytes,
+)
+from s3_storage import delete_video_object, read_video_object, upload_video_bytes
 
 # The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
 active_transcripts = {}
@@ -123,20 +130,60 @@ async def upload_video(
     except Exception as exc:
         print(f"[ERROR] Subida a S3: {exc}")
         raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
+    attach_video_key(sessionId, result["key"])
+    result["savedInSystem"] = True
     return result
 
 
+@app.get("/recordings")
+def get_recordings():
+    return {"recordings": list_saved_recordings()}
+
+
 @app.get("/video")
-async def play_video(key: str):
+async def play_video(key: str, download: bool = False):
     try:
         data, content_type = await asyncio.to_thread(read_video_object, key)
     except RuntimeError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    filename = os.path.basename(key) or "grabacion.webm"
+    disposition = (
+        f'attachment; filename="{filename}"' if download else "inline"
+    )
     return Response(
         content=data,
         media_type=content_type,
-        headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
+        headers={"Content-Disposition": disposition, "Cache-Control": "private, max-age=3600"},
     )
+
+
+@app.delete("/recordings/{session_id}")
+async def delete_recording(session_id: str):
+    record = load_session_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
+    video_key = record.get("videoKey")
+    if video_key:
+        try:
+            await asyncio.to_thread(delete_video_object, video_key)
+        except RuntimeError as exc:
+            detail = str(exc)
+            if "AccessDenied" in detail or "not authorized" in detail.lower():
+                raise HTTPException(
+                    status_code=403,
+                    detail="IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar.",
+                ) from exc
+            raise HTTPException(status_code=502, detail=detail) from exc
+    try:
+        delete_local_session(session_id)
+    except OSError as exc:
+        print(f"[WARN] No se vació del todo la carpeta local: {exc}")
+        if load_session_record(session_id):
+            raise HTTPException(
+                status_code=500,
+                detail="El video se quitó de S3, pero Windows bloqueó la carpeta local. Recarga la biblioteca.",
+            ) from exc
+    return {"ok": True, "sessionId": session_id}
 
 
 @app.websocket("/ws/transcription")
@@ -202,7 +249,10 @@ async def websocket_transcription(websocket: WebSocket):
                 continue
             try:
                 spoken = await asyncio.to_thread(
-                    transcribe_wav_bytes, audio, session.prompt_context()
+                    transcribe_wav_bytes,
+                    audio,
+                    session.prompt_context(),
+                    session.style_prompt(),
                 )
             except Exception as exc:
                 print(f"[ERROR] Whisper: {exc}")

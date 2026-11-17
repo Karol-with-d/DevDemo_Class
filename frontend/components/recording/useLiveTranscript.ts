@@ -16,15 +16,16 @@ export interface TranscriptSaveResult {
   txtPath: string | null;
   docxPath: string | null;
   videoUrl?: string | null;
+  videoKey?: string | null;
 }
 
 export type CaptionStatus = "connecting" | "live" | "saving" | "error";
 
 const TARGET_RATE = 16000;
-const SILENCE_RMS = 0.01;
-const PAUSE_SECONDS = 0.4;
-const MIN_UTTERANCE_SECONDS = 1.5;
-const MAX_UTTERANCE_SECONDS = 8;
+const SILENCE_RMS = 0.012;
+const PAUSE_SECONDS = 0.8;
+const MIN_UTTERANCE_SECONDS = 2.5;
+const MAX_UTTERANCE_SECONDS = 10;
 
 interface Engine {
   ws: WebSocket | null;
@@ -49,7 +50,7 @@ interface Engine {
 }
 
 function emptyResult(segments: TranscriptSegment[]): TranscriptSaveResult {
-  return { segments, jsonPath: null, vttPath: null, txtPath: null, docxPath: null, videoUrl: null };
+  return { segments, jsonPath: null, vttPath: null, txtPath: null, docxPath: null, videoUrl: null, videoKey: null };
 }
 
 function downsample(input: Float32Array, inputRate: number, outputRate: number) {

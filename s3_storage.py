@@ -88,3 +88,14 @@ def read_video_object(key):
     body = obj["Body"].read()
     content_type = media_type_for(key, obj.get("ContentType", ""))
     return body, content_type
+
+
+def delete_video_object(key):
+    if not str(key).startswith("recordings/"):
+        raise RuntimeError("Clave de video no válida.")
+    settings = _require_settings()
+    client = _client(settings["region"])
+    try:
+        client.delete_object(Bucket=settings["bucket"], Key=key)
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Error de S3: {exc}") from exc

@@ -5,7 +5,9 @@ import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
 import { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
+import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
+import { deleteRecording, playbackUrlForKey } from "../lib/api";
 
 function cueClock(seconds: number) {
   const total = Math.max(0, Math.floor(seconds));
@@ -15,7 +17,7 @@ function cueClock(seconds: number) {
 }
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
@@ -86,8 +88,17 @@ export default function Page() {
         {step === "setup" && (
           <div className="w-full max-w-xl">
             <SessionSetup onSessionReady={handleSessionReady} />
+            <button
+              type="button"
+              onClick={() => setStep("library")}
+              className="mt-4 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed] hover:border-white/30"
+            >
+              Grabaciones guardadas
+            </button>
           </div>
         )}
+
+        {step === "library" && <RecordingsLibrary onBack={() => setStep("setup")} />}
 
         {step === "calibration" && (
           <div className="calibration-page w-full max-w-4xl rounded-3xl border border-white/10 bg-[#11191e]/90 p-8 shadow-2xl backdrop-blur-md">
@@ -145,6 +156,45 @@ export default function Page() {
                 Subtítulos del video: {savedTranscript.vttPath}
               </p>
             )}
+            {savedTranscript?.videoKey ? (
+              <p className="mb-4 w-full text-left text-sm text-[#9ce4c1]">
+                Guardado en el sistema. Puedes descargarlo o abrirlo después en Grabaciones.
+              </p>
+            ) : null}
+            <div className="mb-3 flex w-full flex-col gap-2 sm:flex-row">
+              {savedTranscript?.videoKey && (
+                <a
+                  className="flex-1 rounded-xl border border-white/15 py-3.5 text-center text-sm font-bold text-[#e9f0ed] hover:border-white/30"
+                  href={playbackUrlForKey(savedTranscript.videoKey, true)}
+                >
+                  Guardar en dispositivo
+                </a>
+              )}
+              {savedTranscript?.videoKey && sessionData && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm("¿Eliminar esta grabación del sistema y de S3?")) return;
+                    try {
+                      await deleteRecording(sessionData.sessionId);
+                      handleNewSession();
+                    } catch (error) {
+                      window.alert(error instanceof Error ? error.message : "No se pudo eliminar.");
+                    }
+                  }}
+                  className="flex-1 rounded-xl border border-red-400/40 py-3.5 text-sm font-bold text-red-300 hover:bg-red-950/40"
+                >
+                  Eliminar
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setStep("library")}
+              className="mb-3 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed]"
+            >
+              Ver grabaciones guardadas
+            </button>
             <button
               onClick={handleNewSession}
               className="w-full cursor-pointer rounded-xl bg-[#9ce4c1] py-3.5 text-sm font-bold text-[#0b1014] shadow-lg transition-all hover:bg-[#b1f0d2]"
