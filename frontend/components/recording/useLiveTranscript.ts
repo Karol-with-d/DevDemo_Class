@@ -9,6 +9,12 @@ export interface TranscriptSegment {
   text: string;
 }
 
+export interface TechnicalTerm {
+  term: string;
+  lemma?: string;
+  category?: string;
+}
+
 export interface TranscriptSaveResult {
   segments: TranscriptSegment[];
   jsonPath: string | null;
@@ -17,6 +23,7 @@ export interface TranscriptSaveResult {
   docxPath: string | null;
   videoUrl?: string | null;
   videoKey?: string | null;
+  vocabulary?: TechnicalTerm[];
 }
 
 export type CaptionStatus = "connecting" | "live" | "saving" | "error";
@@ -50,7 +57,16 @@ interface Engine {
 }
 
 function emptyResult(segments: TranscriptSegment[]): TranscriptSaveResult {
-  return { segments, jsonPath: null, vttPath: null, txtPath: null, docxPath: null, videoUrl: null, videoKey: null };
+  return {
+    segments,
+    jsonPath: null,
+    vttPath: null,
+    txtPath: null,
+    docxPath: null,
+    videoUrl: null,
+    videoKey: null,
+    vocabulary: [],
+  };
 }
 
 function downsample(input: Float32Array, inputRate: number, outputRate: number) {
@@ -192,6 +208,7 @@ export function useLiveTranscript(
         vttPath?: string | null;
         txtPath?: string | null;
         docxPath?: string | null;
+        vocabulary?: TechnicalTerm[];
       };
       try {
         payload = JSON.parse(event.data);
@@ -225,6 +242,7 @@ export function useLiveTranscript(
           vttPath: payload.vttPath ?? null,
           txtPath: payload.txtPath ?? null,
           docxPath: payload.docxPath ?? null,
+          vocabulary: payload.vocabulary ?? [],
         };
         engine.saved = result;
         engine.segments = result.segments;

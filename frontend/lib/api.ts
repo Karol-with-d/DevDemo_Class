@@ -1,5 +1,17 @@
 const API_BASE = "http://127.0.0.1:8000";
 
+export type TechnicalTerm = {
+  term: string;
+  lemma?: string;
+  category?: string;
+};
+
+export type TranscriptSegment = {
+  start: number;
+  end?: number;
+  text: string;
+};
+
 export type SavedRecording = {
   sessionId: string;
   candidateName: string;
@@ -10,6 +22,8 @@ export type SavedRecording = {
   videoKey: string | null;
   savedInSystem: boolean;
   segmentCount: number;
+  segments?: TranscriptSegment[];
+  vocabulary?: TechnicalTerm[];
 };
 
 export function playbackUrlForKey(key: string, download = false) {

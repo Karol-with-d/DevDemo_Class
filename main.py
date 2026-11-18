@@ -236,7 +236,7 @@ async def websocket_transcription(websocket: WebSocket):
                         session is not None
                         and active_transcripts.get(session.session_id) is session
                     )
-                    saved = session.write() if owns_session else None
+                    saved = session.write(analyze=True) if owns_session else None
                     await websocket.send_json({"type": "saved", **(saved or {"segments": []})})
                     break
                 continue
@@ -289,7 +289,7 @@ async def websocket_transcription(websocket: WebSocket):
         print(f"[ERROR] Error en transcripción: {exc}")
     finally:
         if session is not None and active_transcripts.get(session.session_id) is session:
-            session.write()
+            session.write(analyze=True)
             active_transcripts.pop(session.session_id, None)
 
 def _giro_desde_rostro(landmarks, matrix=None):

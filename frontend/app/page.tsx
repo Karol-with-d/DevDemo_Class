@@ -4,17 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
+import { TechnicalTranscript } from "../components/recording/TechnicalTranscript";
 import { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
 import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
 import { deleteRecording, playbackUrlForKey } from "../lib/api";
-
-function cueClock(seconds: number) {
-  const total = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(total / 60);
-  const secs = total % 60;
-  return `${minutes}:${secs.toString().padStart(2, "0")}`;
-}
 
 export default function Page() {
   const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library">("setup");
@@ -137,20 +131,10 @@ export default function Page() {
                 El video no se pudo subir. Los subtítulos sí quedaron guardados.
               </p>
             )}
-            <div className="mb-6 max-h-64 w-full overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4 text-left">
-              {savedTranscript?.segments.length ? (
-                <ul className="flex flex-col gap-3">
-                  {savedTranscript.segments.map((segment) => (
-                    <li key={`${segment.start}-${segment.text}`} className="text-sm">
-                      <span className="mr-2 font-semibold text-[#9ce4c1]">{cueClock(segment.start)}</span>
-                      <span>{segment.text}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="text-sm text-[#82918f]">No se detectó voz durante la grabación.</p>
-              )}
-            </div>
+            <TechnicalTranscript
+              segments={savedTranscript?.segments ?? []}
+              vocabulary={savedTranscript?.vocabulary ?? []}
+            />
             {savedTranscript?.vttPath && (
               <p className="mb-6 w-full break-all text-left text-xs text-[#82918f]">
                 Subtítulos del video: {savedTranscript.vttPath}

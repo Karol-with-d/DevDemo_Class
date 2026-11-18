@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import {
   SavedRecording,
   deleteRecording,
@@ -127,6 +128,10 @@ export function RecordingsLibrary({ onBack }: RecordingsLibraryProps) {
               ) : (
                 <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video en S3.</p>
               )}
+              <TechnicalTranscript
+                segments={selected.segments ?? []}
+                vocabulary={selected.vocabulary ?? []}
+              />
               <div className="flex flex-wrap gap-2">
                 {selected.videoKey && (
                   <a

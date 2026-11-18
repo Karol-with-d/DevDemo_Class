@@ -209,6 +209,8 @@ class TranscriptSession:
         self.technology = technology or ""
         self.complexity = complexity or ""
         self.segments = []
+        self.vocabulary = []
+        self._vocabulary_ready = False
         self.video_key = None
         self.directory = os.path.join(RECORDINGS_DIR, self.session_id)
         os.makedirs(self.directory, exist_ok=True)
@@ -236,7 +238,24 @@ class TranscriptSession:
         self.write()
         return segment
 
-    def write(self):
+    def analyze_vocabulary(self):
+        """spaCy + glossary once per session, after Whisper finishes."""
+        if self._vocabulary_ready:
+            return self.vocabulary
+        try:
+            from vocab_extractor import extract_technical_terms
+
+            spoken = " ".join(segment["text"] for segment in self.segments)
+            self.vocabulary = extract_technical_terms(spoken, self.technology)
+        except Exception as exc:
+            print(f"[WARN] No se extrajo vocabulario técnico: {exc}")
+            self.vocabulary = []
+        self._vocabulary_ready = True
+        return self.vocabulary
+
+    def write(self, analyze=False):
+        if analyze:
+            self.analyze_vocabulary()
         payload = {
             "sessionId": self.session_id,
             "candidateName": self.candidate_name,
@@ -245,6 +264,7 @@ class TranscriptSession:
             "complexity": self.complexity,
             "savedAt": datetime.now().isoformat(timespec="seconds"),
             "segments": self.segments,
+            "vocabulary": self.vocabulary,
             "videoKey": self.video_key,
             "savedInSystem": bool(self.video_key),
         }
@@ -271,6 +291,7 @@ class TranscriptSession:
             "txtPath": txt_path,
             "docxPath": docx_path,
             "segments": self.segments,
+            "vocabulary": self.vocabulary,
         }
 
     def to_vtt(self):
@@ -366,6 +387,8 @@ def list_saved_recordings():
                 "videoKey": payload.get("videoKey"),
                 "savedInSystem": bool(payload.get("videoKey")),
                 "segmentCount": len(payload.get("segments") or []),
+                "segments": payload.get("segments") or [],
+                "vocabulary": payload.get("vocabulary") or [],
             }
         )
     items.sort(key=lambda item: item.get("savedAt") or "", reverse=True)
