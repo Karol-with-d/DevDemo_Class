@@ -7,11 +7,12 @@ import { SplitRecordingInterface } from "../components/recording/SplitRecordingI
 import { TechnicalTranscript } from "../components/recording/TechnicalTranscript";
 import { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
 import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
+import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
 import { deleteRecording, playbackUrlForKey } from "../lib/api";
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library" | "review">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
@@ -179,12 +180,32 @@ export default function Page() {
             >
               Ver grabaciones guardadas
             </button>
+            {/* US11: acceso a la auditoría con pestañas (Reporte/Rúbrica/Galería) */}
+            <button
+              type="button"
+              onClick={() => setStep("review")}
+              className="mb-3 w-full rounded-xl border border-[#9ce4c1]/40 py-3.5 text-sm font-semibold text-[#9ce4c1] hover:bg-[#9ce4c1]/10"
+            >
+              Auditar evaluación
+            </button>
             <button
               onClick={handleNewSession}
               className="w-full cursor-pointer rounded-xl bg-[#9ce4c1] py-3.5 text-sm font-bold text-[#0b1014] shadow-lg transition-all hover:bg-[#b1f0d2]"
             >
               Iniciar nueva sesión
             </button>
+          </div>
+        )}
+
+        {/* Auditoría (US11): Reporte / Rúbrica / Galería con datos reales.
+            Se accede desde "Grabación finalizada" con el botón "Auditar evaluación". */}
+        {step === "review" && (
+          <div className="w-full">
+            <SessionReview
+              session={sessionData}
+              transcript={savedTranscript}
+              onNewSession={handleNewSession}
+            />
           </div>
         )}
       </main>
