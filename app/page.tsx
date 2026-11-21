@@ -3,9 +3,10 @@ import { useState } from 'react';
 import { SessionSetup, SessionData } from '../components/session/SessionForm';
 import { DeviceCalibration } from '../components/calibration/DeviceCalibration';
 import { SplitRecordingInterface } from '../components/recording/SplitRecordingInterface';
+import { SessionReview } from '../components/review/SessionReview';
 
 export default function Home() {
-  const [step, setStep] = useState<'setup' | 'calibration' | 'recording' | 'finished'>('setup');
+  const [step, setStep] = useState<'setup' | 'calibration' | 'recording' | 'finished' | 'review'>('setup');
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [mediaStream, setMediaStream] = useState<MediaStream | null>(null);
 
@@ -57,11 +58,27 @@ export default function Home() {
             La sesión del candidato {sessionData?.candidateName} se ha guardado correctamente.
           </p>
           <button
-            onClick={() => setStep('setup')}
+            onClick={() => setStep('review')}
             className="w-full cursor-pointer rounded-xl bg-[#9ce4c1] py-3.5 text-sm font-bold text-[#0b1014] shadow-lg transition-all hover:bg-[#b1f0d2]"
+          >
+            Auditar evaluación
+          </button>
+          <button
+            onClick={() => setStep('setup')}
+            className="mt-3 w-full cursor-pointer rounded-xl border border-white/10 bg-white/[0.03] py-3.5 text-sm font-bold text-[#e9f0ed] transition-all hover:border-[#9ce4c1]/40 hover:text-[#9ce4c1]"
           >
             Iniciar nueva sesión
           </button>
+        </div>
+      )}
+
+      {/* Auditoría (US11): Reporte / Rúbrica / Galería.
+          Se accede desde la pantalla "Grabación finalizada" con el botón
+          "Auditar evaluación". Las vistas internas muestran datos de muestra
+          hasta conectar con el backend de reportes/grabaciones. */}
+      {step === 'review' && (
+        <div className="w-full">
+          <SessionReview session={sessionData} onNewSession={() => setStep('setup')} />
         </div>
       )}
     </main>
