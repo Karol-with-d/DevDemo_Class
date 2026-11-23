@@ -28,11 +28,12 @@ export interface TranscriptSaveResult {
 
 export type CaptionStatus = "connecting" | "live" | "saving" | "error";
 
-const TARGET_RATE = 16000;
+const TARGET_RATE = 24000;
 const SILENCE_RMS = 0.012;
-const PAUSE_SECONDS = 0.8;
-const MIN_UTTERANCE_SECONDS = 2.5;
-const MAX_UTTERANCE_SECONDS = 10;
+const PAUSE_SECONDS = 0.5;
+const MIN_UTTERANCE_SECONDS = 0.6;
+const MAX_UTTERANCE_SECONDS = 3;
+const SEND_SECONDS = 0.1;
 
 interface Engine {
   ws: WebSocket | null;
@@ -40,13 +41,16 @@ interface Engine {
   processor: ScriptProcessorNode | null;
   gain: GainNode | null;
   source: MediaStreamAudioSourceNode | null;
-  chunks: Float32Array[];
-  samples: number;
-  silence: number;
+  turnChunks: Float32Array[];
+  pendingSamples: number;
+  turnSamples: number;
+  turnSilence: number;
+  turnStart: number | null;
   startedAt: number;
-  bufferStartedAt: number | null;
+  loggedPartial: boolean;
   sendChain: Promise<void>;
   pending: number;
+  sentAt: number[];
   drain: Array<() => void>;
   segments: TranscriptSegment[];
   ready: Promise<void>;
@@ -92,36 +96,53 @@ function rms(samples: Float32Array) {
   return Math.sqrt(sum / samples.length);
 }
 
-function encodeWav(samples: Float32Array, sampleRate: number) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const write = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
-  };
-  write(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  write(8, "WAVE");
-  write(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  write(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-  let offset = 44;
+function pcm16Base64(samples: Float32Array) {
+  const bytes = new Uint8Array(samples.length * 2);
+  const view = new DataView(bytes.buffer);
   for (let i = 0; i < samples.length; i++) {
     const sample = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-    offset += 2;
+    view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
-  return buffer;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function mergeSamples(chunks: Float32Array[], total: number) {
+  const merged = new Float32Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return merged;
 }
 
 function elapsedSeconds(engine: Engine) {
   return (performance.now() - engine.startedAt) / 1000;
+}
+
+type LiveTiming = {
+  audioSeconds?: number;
+  bytes?: number;
+  apiMs?: number;
+  decodeMs?: number;
+  waitMs?: number;
+  saveMs?: number;
+  reason?: string;
+};
+
+function logLiveReply(kind: string, sentAt: number[], timing?: LiveTiming) {
+  const sent = sentAt.shift();
+  const roundTrip = sent === undefined ? null : Math.round(performance.now() - sent);
+  const detail = timing
+    ? ` audio=${timing.audioSeconds ?? "?"}s api=${timing.apiMs ?? "?"}ms decode=${timing.decodeMs ?? "?"}ms wait=${timing.waitMs ?? "?"}ms save=${timing.saveMs ?? 0}ms reason=${timing.reason ?? "?"}`
+    : "";
+  console.info(
+    `[TIME live] reply=${kind} roundTrip=${roundTrip === null ? "?" : `${roundTrip}ms`}${detail}`,
+  );
 }
 
 export function useLiveTranscript(
@@ -155,13 +176,16 @@ export function useLiveTranscript(
       processor: null,
       gain: null,
       source: null,
-      chunks: [],
-      samples: 0,
-      silence: 0,
+      turnChunks: [],
+      pendingSamples: 0,
+      turnSamples: 0,
+      turnSilence: 0,
+      turnStart: null,
       startedAt: performance.now(),
-      bufferStartedAt: null,
+      loggedPartial: false,
       sendChain: Promise.resolve(),
       pending: 0,
+      sentAt: [],
       drain: [],
       segments: [],
       ready: readyPromise,
@@ -209,6 +233,7 @@ export function useLiveTranscript(
         txtPath?: string | null;
         docxPath?: string | null;
         vocabulary?: TechnicalTerm[];
+        timing?: LiveTiming;
       };
       try {
         payload = JSON.parse(event.data);
@@ -221,7 +246,19 @@ export function useLiveTranscript(
         setStatus("live");
         return;
       }
+      if (payload.type === "partial" && payload.text) {
+        if (!engine.loggedPartial) {
+          engine.loggedPartial = true;
+          const sinceSpeech = engine.turnStart === null
+            ? 0
+            : Math.round(performance.now() - engine.startedAt - engine.turnStart * 1000);
+          console.info(`[TIME live] partial ${payload.text.length}c sinceSpeech=${sinceSpeech}ms`);
+        }
+        setCaption(payload.text);
+        return;
+      }
       if (payload.type === "subtitle" && payload.text) {
+        logLiveReply("subtitle", engine.sentAt, payload.timing);
         publish({
           start: payload.start ?? 0,
           end: payload.end ?? 0,
@@ -232,7 +269,11 @@ export function useLiveTranscript(
         return;
       }
       if (payload.type === "chunk-done" || payload.type === "error") {
+        logLiveReply(payload.type, engine.sentAt, payload.timing);
         noteChunkFinished();
+        if (payload.type === "chunk-done") {
+          setCaption(engine.segments.at(-1)?.text ?? "");
+        }
         return;
       }
       if (payload.type === "saved") {
@@ -279,58 +320,74 @@ export function useLiveTranscript(
     engine.processor = processor;
     engine.gain = gain;
 
-    const takeBuffer = () => {
-      const merged = new Float32Array(engine.samples);
-      let offset = 0;
-      for (const chunk of engine.chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const start = engine.bufferStartedAt ?? elapsedSeconds(engine);
-      engine.chunks = [];
-      engine.samples = 0;
-      engine.silence = 0;
-      engine.bufferStartedAt = null;
-      return { samples: merged, start, end: elapsedSeconds(engine) };
+    const sendPcm = (samples: Float32Array) => {
+      if (samples.length === 0) return;
+      const pcm = pcm16Base64(samples);
+      engine.sendChain = engine.sendChain.then(async () => {
+        await engine.ready;
+        if (socket.readyState !== WebSocket.OPEN) return;
+        socket.send(JSON.stringify({ type: "audio", pcm }));
+      });
     };
 
-    const enqueueWav = (samples: Float32Array, start: number, end: number) => {
-      if (samples.length < TARGET_RATE * 0.3 || rms(samples) < SILENCE_RMS) return;
+    const takePending = () => {
+      const samples = mergeSamples(engine.turnChunks, engine.pendingSamples);
+      engine.turnChunks = [];
+      engine.pendingSamples = 0;
+      return samples;
+    };
+
+    const commitTurn = () => {
+      const samples = takePending();
+      if (engine.turnSamples <= 0 && samples.length === 0) {
+        engine.turnStart = null;
+        return;
+      }
+      const start = engine.turnStart ?? elapsedSeconds(engine);
+      const end = elapsedSeconds(engine);
+      engine.turnSamples = 0;
+      engine.turnSilence = 0;
+      engine.turnStart = null;
+      engine.loggedPartial = false;
       engine.pending += 1;
+      console.info(
+        `[TIME live] commit audio=${(end - start).toFixed(2)}s inFlight=${engine.pending}`,
+      );
       engine.sendChain = engine.sendChain.then(async () => {
-        if (engine.stopped && socket.readyState !== WebSocket.OPEN) {
-          noteChunkFinished();
-          return;
-        }
         await engine.ready;
         if (socket.readyState !== WebSocket.OPEN) {
           noteChunkFinished();
           return;
         }
-        socket.send(JSON.stringify({ type: "chunk", start, end }));
-        socket.send(encodeWav(samples, TARGET_RATE));
+        if (samples.length > 0) {
+          socket.send(JSON.stringify({ type: "audio", pcm: pcm16Base64(samples) }));
+        }
+        socket.send(JSON.stringify({ type: "commit", start, end }));
+        engine.sentAt.push(performance.now());
       });
-    };
-
-    const flush = (force: boolean) => {
-      if (engine.samples === 0) return;
-      const seconds = engine.samples / TARGET_RATE;
-      const paused = engine.silence > TARGET_RATE * PAUSE_SECONDS;
-      const readyToSend = (seconds > MIN_UTTERANCE_SECONDS && paused) || seconds > MAX_UTTERANCE_SECONDS;
-      if (!force && !readyToSend) return;
-      const utterance = takeBuffer();
-      enqueueWav(utterance.samples, utterance.start, utterance.end);
     };
 
     processor.onaudioprocess = (event) => {
       if (engine.stopped) return;
       const block = downsample(event.inputBuffer.getChannelData(0), context.sampleRate, TARGET_RATE);
       if (block.length === 0) return;
-      if (engine.samples === 0) engine.bufferStartedAt = elapsedSeconds(engine);
-      engine.chunks.push(block);
-      engine.samples += block.length;
-      engine.silence = rms(block) > SILENCE_RMS ? 0 : engine.silence + block.length;
-      flush(false);
+      const loud = rms(block) > SILENCE_RMS;
+      if (engine.turnStart === null) {
+        if (!loud) return;
+        engine.turnStart = elapsedSeconds(engine);
+      }
+      engine.turnChunks.push(block);
+      engine.pendingSamples += block.length;
+      engine.turnSamples += block.length;
+      engine.turnSilence = loud ? 0 : engine.turnSilence + block.length;
+      if (engine.pendingSamples >= TARGET_RATE * SEND_SECONDS) {
+        sendPcm(takePending());
+      }
+      const seconds = engine.turnSamples / TARGET_RATE;
+      const paused = engine.turnSilence > TARGET_RATE * PAUSE_SECONDS;
+      if ((seconds > MIN_UTTERANCE_SECONDS && paused) || seconds > MAX_UTTERANCE_SECONDS) {
+        commitTurn();
+      }
     };
 
     source.connect(processor);
@@ -366,20 +423,19 @@ export function useLiveTranscript(
     engine.stopped = true;
     if (engine.processor) engine.processor.onaudioprocess = null;
 
-    if (engine.samples > 0) {
-      const merged = new Float32Array(engine.samples);
-      let offset = 0;
-      for (const chunk of engine.chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const start = engine.bufferStartedAt ?? elapsedSeconds(engine);
-      engine.chunks = [];
-      engine.samples = 0;
-      engine.bufferStartedAt = null;
-      if (merged.length >= TARGET_RATE * 0.3 && rms(merged) >= SILENCE_RMS) {
+    if (engine.turnSamples > 0 || engine.pendingSamples > 0) {
+      const samples = mergeSamples(engine.turnChunks, engine.pendingSamples);
+      const start = engine.turnStart ?? elapsedSeconds(engine);
+      const end = elapsedSeconds(engine);
+      engine.turnChunks = [];
+      engine.pendingSamples = 0;
+      engine.turnSamples = 0;
+      engine.turnSilence = 0;
+      engine.turnStart = null;
+      if (samples.length >= TARGET_RATE * 0.3 && rms(samples) >= SILENCE_RMS) {
         engine.pending += 1;
-        const wav = encodeWav(merged, TARGET_RATE);
+        engine.loggedPartial = false;
+        console.info(`[TIME live] commit audio=${(end - start).toFixed(2)}s span=final`);
         engine.sendChain = engine.sendChain.then(async () => {
           await engine.ready;
           const socket = engine.ws;
@@ -387,8 +443,9 @@ export function useLiveTranscript(
             engine.pending = Math.max(0, engine.pending - 1);
             return;
           }
-          socket.send(JSON.stringify({ type: "chunk", start, end: elapsedSeconds(engine) }));
-          socket.send(wav);
+          socket.send(JSON.stringify({ type: "audio", pcm: pcm16Base64(samples) }));
+          socket.send(JSON.stringify({ type: "commit", start, end }));
+          engine.sentAt.push(performance.now());
         });
       }
     }

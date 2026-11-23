@@ -23,14 +23,16 @@ import asyncio
 import json
 import math
 import os
+import time
 
+from live_caption import relay_live_transcription
 from transcriber import (
     TranscriptSession,
     attach_video_key,
     delete_local_session,
     list_saved_recordings,
     load_session_record,
-    transcribe_wav_bytes,
+    transcribe_speed_demo,
 )
 from s3_storage import delete_video_object, read_video_object, upload_video_bytes
 
@@ -192,105 +194,30 @@ async def delete_recording(session_id: str):
     return {"ok": True, "sessionId": session_id}
 
 
+@app.post("/demo/transcribe")
+async def demo_transcribe(file: UploadFile = File(...), language: str = Form("es")):
+    """Microphone speed test for gpt-transcribe. One clip in, text and timing out."""
+    data = await file.read()
+    if len(data) < 44:
+        raise HTTPException(status_code=400, detail="El audio llegó vacío.")
+    lang = language if language in {"es", "en"} else "es"
+    try:
+        return await asyncio.to_thread(transcribe_speed_demo, data, lang)
+    except Exception as exc:
+        print(f"[ERROR] Demo gpt-transcribe: {exc}")
+        detail = str(exc)
+        if "401" in detail or "expired" in detail.lower() or "invalid_api_key" in detail.lower():
+            raise HTTPException(
+                status_code=401,
+                detail="La clave de OpenAI expiró. Actualiza OPENAI_API_KEY en el archivo .env.",
+            ) from exc
+        raise HTTPException(status_code=502, detail="No se pudo transcribir ese fragmento.") from exc
+
+
 @app.websocket("/ws/transcription")
 async def websocket_transcription(websocket: WebSocket):
-    """Live subtitles for the camera recording. Audio arrives as WAV chunks."""
-    await websocket.accept()
-    print("[INFO] Transcripción conectada")
-    session = None
-    pending = None
-    whisper_auth_failed = False
-
-    async def reply_done():
-        await websocket.send_json({"type": "chunk-done"})
-
-    try:
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-
-            text_frame = message.get("text")
-            if text_frame:
-                try:
-                    payload = json.loads(text_frame)
-                except json.JSONDecodeError:
-                    continue
-
-                kind = payload.get("type")
-                if kind == "start":
-                    session = TranscriptSession(
-                        session_id=payload.get("sessionId", ""),
-                        candidate_name=payload.get("candidateName", ""),
-                        evaluator_name=payload.get("evaluatorName", ""),
-                        technology=payload.get("technology", ""),
-                        complexity=payload.get("complexity", ""),
-                    )
-                    active_transcripts[session.session_id] = session
-                    pending = None
-                    await websocket.send_json({"type": "ready", "sessionId": session.session_id})
-                elif kind == "chunk":
-                    pending = payload
-                elif kind == "stop":
-                    owns_session = (
-                        session is not None
-                        and active_transcripts.get(session.session_id) is session
-                    )
-                    saved = session.write(analyze=True) if owns_session else None
-                    await websocket.send_json({"type": "saved", **(saved or {"segments": []})})
-                    break
-                continue
-
-            audio = message.get("bytes")
-            if audio is None or session is None:
-                continue
-            if active_transcripts.get(session.session_id) is not session:
-                await reply_done()
-                continue
-
-            meta = pending or {}
-            pending = None
-            if whisper_auth_failed:
-                await reply_done()
-                continue
-            try:
-                spoken = await asyncio.to_thread(
-                    transcribe_wav_bytes,
-                    audio,
-                    session.prompt_context(),
-                    session.style_prompt(),
-                )
-            except Exception as exc:
-                print(f"[ERROR] Whisper: {exc}")
-                detail = str(exc)
-                if "401" in detail or "expired" in detail.lower() or "invalid_api_key" in detail.lower():
-                    whisper_auth_failed = True
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "La clave de OpenAI expiró. Actualiza OPENAI_API_KEY en el archivo .env.",
-                    })
-                else:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "No se pudo transcribir ese fragmento.",
-                    })
-                continue
-
-            if spoken:
-                segment = session.add(meta.get("start", 0), meta.get("end", 0), spoken)
-                if segment:
-                    print(f"[SUB] {segment['start']:.1f}s {segment['text']}", flush=True)
-                    await websocket.send_json({"type": "subtitle", **segment})
-                    continue
-            await reply_done()
-    except WebSocketDisconnect:
-        print("[INFO] Transcripción desconectada")
-    except Exception as exc:
-        print(f"[ERROR] Error en transcripción: {exc}")
-    finally:
-        if session is not None and active_transcripts.get(session.session_id) is session:
-            session.write(analyze=True)
-            active_transcripts.pop(session.session_id, None)
+    """Live subtitles. The browser streams PCM and this process talks to gpt-live-transcribe."""
+    await relay_live_transcription(websocket)
 
 def _giro_desde_rostro(landmarks, matrix=None):
     """Head turn from the face mesh. Finding a face is not the same as facing the camera."""
@@ -384,6 +311,8 @@ async def websocket_pose_analysis(websocket: WebSocket):
     espalda_activa = False
     motivo_sostenido = None
     frames_sin_pose = 0
+    pose_frames = 0
+    pose_slow = 0
     VENTANA_FRAMES = 90
     MIN_MUESTRAS_MOVIMIENTO = 30
     # About three camera frames. One noisy frame must not raise the banner.
@@ -398,6 +327,7 @@ async def websocket_pose_analysis(websocket: WebSocket):
         while True:
             # Recibir fotograma binario de la cámara
             bytes_data = await websocket.receive_bytes()
+            frame_started = time.perf_counter()
             np_arr = np.frombuffer(bytes_data, np.uint8)
             frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
@@ -623,6 +553,16 @@ async def websocket_pose_analysis(websocket: WebSocket):
                 alerta_contacto = "Sin contacto visual"
                 color_contacto = "#9ca3af"
                 alerta_expresion = "Rostro no detectado"
+
+            pose_ms = int(round((time.perf_counter() - frame_started) * 1000))
+            pose_frames += 1
+            if pose_ms >= 200:
+                pose_slow += 1
+            if pose_ms >= 200 or pose_frames % 30 == 0:
+                print(
+                    f"[TIME pose] frame={pose_ms}ms bytes={len(bytes_data)} slow={pose_slow}/{pose_frames}",
+                    flush=True,
+                )
 
             # Emitir métricas completas actualizadas a la web
             await websocket.send_json({

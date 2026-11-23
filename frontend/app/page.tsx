@@ -10,6 +10,7 @@ import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
 import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
 import { deleteRecording, playbackUrlForKey } from "../lib/api";
+import Link from "next/link";
 
 export default function Page() {
   const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library" | "review">("setup");
@@ -20,6 +21,15 @@ export default function Page() {
   const streamRef = useRef<MediaStream | null>(null);
   const pageAlive = useRef(false);
   streamRef.current = stream;
+
+  useEffect(() => {
+    if (window.isSecureContext) return;
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return;
+    const port = window.location.port ? `:${window.location.port}` : "";
+    const target = `http://127.0.0.1${port}${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.replace(target);
+  }, []);
 
   useEffect(() => {
     pageAlive.current = true;
@@ -90,6 +100,12 @@ export default function Page() {
             >
               Grabaciones guardadas
             </button>
+            <Link
+              href="/gpt-transcribe"
+              className="mt-2 block w-full rounded-xl border border-[#9ce4c1]/30 py-3.5 text-center text-sm font-semibold text-[#9ce4c1] hover:bg-[#9ce4c1]/10"
+            >
+              Probar velocidad de GPT Transcribe
+            </Link>
           </div>
         )}
 
