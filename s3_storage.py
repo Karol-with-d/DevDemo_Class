@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -99,3 +100,43 @@ def delete_video_object(key):
         client.delete_object(Bucket=settings["bucket"], Key=key)
     except (BotoCoreError, ClientError) as exc:
         raise RuntimeError(f"Error de S3: {exc}") from exc
+
+
+def upload_evaluation_json(session_id, evaluation_data):
+    """Guarda el JSON de la rúbrica y reporte cuantitativo en S3 bajo recordings/{session}/evaluation.json"""
+    settings = _require_settings()
+    session = safe_session_id(session_id)
+    key = f"recordings/{session}/evaluation.json"
+    client = _client(settings["region"])
+    body = json.dumps(evaluation_data, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        client.put_object(
+            Bucket=settings["bucket"],
+            Key=key,
+            Body=body,
+            ContentType="application/json; charset=utf-8",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Error de S3 al guardar evaluación: {exc}") from exc
+
+    return {"key": key, "savedInS3": True}
+
+
+def read_evaluation_json(session_id):
+    """Lee el JSON de evaluación desde S3 si existe; devuelve None si aún no ha sido evaluado."""
+    settings = _require_settings()
+    session = safe_session_id(session_id)
+    key = f"recordings/{session}/evaluation.json"
+    client = _client(settings["region"])
+    try:
+        obj = client.get_object(Bucket=settings["bucket"], Key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404"):
+            return None
+        raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
+    except BotoCoreError as exc:
+        raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
+
+    raw = obj["Body"].read().decode("utf-8")
+    return json.loads(raw)

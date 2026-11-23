@@ -7,13 +7,11 @@
 // (Reporte / Rúbrica / Galería) que conmutan INSTANTÁNEAMENTE vía useState,
 // sin recargar la página ni usar el router de Next.js.
 //
-// Estado de datos en esta rama (feature/US05):
-//  - "Ver Reporte"        -> datos REALES de la transcripción guardada
-//                           (segments, vocabulary, video) de esta sesión.
-//  - "Galería de Videos"  -> datos REALES del backend via listRecordings()
-//                           (requiere el backend en el puerto 8000).
-//  - "Ver Rúbrica"        -> datos de MUESTRA, pendiente de integrar el
-//                           HybridRubricEditor de la rama US10.
+// Estado de datos:
+//  - "Ver Reporte"        -> transcripción real (segments, vocabulary, video).
+//  - "Galería de Videos"  -> listRecordings() del backend (puerto 8000).
+//  - "Ver Rúbrica"        -> reporte cuantitativo UNIVO de US10
+//                           (ConsolidatedReportView + evaluación en S3).
 // ============================================================================
 
 import { useState } from "react";
@@ -62,10 +60,6 @@ export function SessionReview({ session, transcript, onNewSession }: SessionRevi
                 {session?.complexity} · Evaluador: {session?.evaluatorName || "—"}
               </span>
             </div>
-            {/* Aviso temporal: quitar cuando se integre la rúbrica real de US10 */}
-            <p className="mt-2 text-[10px] text-[#5b6b68]">
-              * La rúbrica muestra criterios de muestra, pendiente de integración con US10.
-            </p>
           </div>
           <button
             onClick={onNewSession}
