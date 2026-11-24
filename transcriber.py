@@ -2,9 +2,11 @@ import io
 import json
 import os
 import queue
+import re
 import shutil
 import threading
 import time
+from collections import Counter
 from datetime import datetime
 
 import numpy as np
@@ -20,6 +22,57 @@ full_text = []
 _client = None
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
+
+VERBATIM_FILLER_CUE = "Eh, pues, o sea, este... bueno, la verdad es que, mmm, sí, ¿verdad?"
+FILLER_KEYWORDS = [
+    "eh",
+    "este",
+    "o sea",
+    "pues",
+    "verdad",
+    "bueno",
+    "digamos",
+    "básicamente",
+    "mmm",
+]
+
+MULETILLA_PATTERNS = [
+    (r"\bo sea\b", "o sea"),
+    (r"\bla verdad\b", "la verdad"),
+    (r"\bes que\b", "es que"),
+    (r"\beh+\b", "eh"),
+    (r"\beste+\b", "este"),
+    (r"\bpues\b", "pues"),
+    (r"\bbueno\b", "bueno"),
+    (r"\bverdad\b", "verdad"),
+    (r"\bdigamos\b", "digamos"),
+    (r"\bbásicamente\b", "básicamente"),
+    (r"\bmmm+\b", "mmm"),
+]
+
+
+def extract_muletillas_from_text(text):
+    """Extract and count Spanish filler words (muletillas) from verbatim text."""
+    cleaned = str(text or "").lower()
+    counts = Counter()
+    for pattern, label in MULETILLA_PATTERNS:
+        matches = re.findall(pattern, cleaned)
+        if matches:
+            counts[label] += len(matches)
+
+    total_words = len(re.findall(r"\b\w+\b", cleaned))
+    total_muletillas = sum(counts.values())
+    ratio_pct = round((total_muletillas / total_words) * 100, 2) if total_words else 0.0
+    breakdown = dict(counts.most_common())
+    items = [{"phrase": phrase, "count": count} for phrase, count in counts.most_common()]
+
+    return {
+        "total": total_muletillas,
+        "totalWords": total_words,
+        "ratioPct": ratio_pct,
+        "breakdown": breakdown,
+        "items": items,
+    }
 
 
 def get_client():
@@ -37,6 +90,16 @@ def on_audio(indata, frames, time, status):
 
 def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
     return _run_transcription(samples, sample_rate, context, style_prompt)["text"]
+
+
+def _build_verbatim_prompt(style_prompt=None):
+    base = (
+        style_prompt
+        or f"Transcripción literal en español. {VERBATIM_FILLER_CUE}"
+    )
+    if VERBATIM_FILLER_CUE.lower() not in base.lower():
+        base = f"{base.strip()} {VERBATIM_FILLER_CUE}"
+    return base[:500]
 
 
 def _run_transcription(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
@@ -64,8 +127,12 @@ def _run_transcription(samples, sample_rate=SAMPLE_RATE, context=None, style_pro
     result = get_client().audio.transcriptions.create(
         model="gpt-transcribe",
         file=buf,
-        prompt=(style_prompt or "Transcripción en español. Solo el audio de este fragmento.")[:500],
-        extra_body={"languages": ["es"]},
+        prompt=_build_verbatim_prompt(style_prompt),
+        temperature=0,
+        extra_body={
+            "languages": ["es"],
+            "keywords": FILLER_KEYWORDS,
+        },
     )
     api_ms = int(round((time.perf_counter() - started) * 1000))
     text = _without_prompt_echo(result.text)
@@ -100,11 +167,18 @@ def _without_prompt_echo(text):
     """A hum or empty room sometimes comes back as the prompt itself."""
     cleaned = " ".join((text or "").split())
     lowered = _normalize_caption(cleaned)
-    for prefix in ("clase en español.", "clase en español", "transcripción en español."):
+    echo_prefixes = (
+        "clase en español.",
+        "clase en español",
+        "transcripción en español.",
+        "transcripción literal en español.",
+        VERBATIM_FILLER_CUE.lower(),
+    )
+    for prefix in echo_prefixes:
         if lowered.startswith(prefix):
             cleaned = cleaned[len(prefix):].strip(" .")
             lowered = _normalize_caption(cleaned)
-    if not cleaned:
+    if not cleaned or lowered == VERBATIM_FILLER_CUE.lower():
         return ""
     pieces = [piece.strip(" .¡!¿?").lower() for piece in cleaned.split(".")]
     pieces = [piece for piece in pieces if piece]
@@ -115,7 +189,9 @@ def _without_prompt_echo(text):
 
 def _is_repeat_or_junk(text, previous):
     normalized = _normalize_caption(text)
-    if len(normalized) < 3:
+    bare = normalized.strip(" .¡!¿?,")
+    known_short_fillers = {"eh", "uh", "um", "mm", "mmm"}
+    if len(bare) < 3 and bare not in known_short_fillers:
         return True
     junk = (
         "gracias por ver",
@@ -191,7 +267,12 @@ def transcribe_speed_demo(data, language="es"):
     result = get_client().audio.transcriptions.create(
         model="gpt-transcribe",
         file=buf,
-        extra_body={"languages": [language]},
+        prompt=VERBATIM_FILLER_CUE,
+        temperature=0,
+        extra_body={
+            "languages": [language],
+            "keywords": FILLER_KEYWORDS,
+        },
     )
     api_ms = int(round((time.perf_counter() - started) * 1000))
     text = " ".join((getattr(result, "text", "") or "").split())
@@ -239,7 +320,19 @@ def save_docx(path=None):
     path = path or f"transcripcion_{datetime.now():%Y%m%d_%H%M}.docx"
     doc = Document()
     doc.add_heading("Transcripción", level=1)
-    doc.add_paragraph(" ".join(full_text))
+    combined = " ".join(full_text)
+    doc.add_paragraph(combined)
+
+    muletillas = extract_muletillas_from_text(combined)
+    if muletillas["total"] > 0:
+        doc.add_heading("Muletillas detectadas", level=2)
+        summary = ", ".join(
+            f"{item['phrase']} ({item['count']})" for item in muletillas["items"]
+        )
+        doc.add_paragraph(
+            f"Total: {muletillas['total']} ({muletillas['ratioPct']}% de las palabras) — {summary}"
+        )
+
     doc.save(path)
     return path
 
@@ -290,6 +383,14 @@ class TranscriptSession:
         self.segments = []
         self.vocabulary = []
         self._vocabulary_ready = False
+        self.muletillas = {
+            "total": 0,
+            "totalWords": 0,
+            "ratioPct": 0.0,
+            "breakdown": {},
+            "items": [],
+        }
+        self._muletillas_ready = False
         self.video_key = None
         self.directory = os.path.join(RECORDINGS_DIR, self.session_id)
         os.makedirs(self.directory, exist_ok=True)
@@ -298,7 +399,9 @@ class TranscriptSession:
         return [segment["text"] for segment in self.segments[-2:]]
 
     def style_prompt(self):
-        parts = ["Transcripción en español de una evaluación técnica. Solo este fragmento."]
+        parts = [
+            f"Transcripción literal en español de una evaluación técnica. {VERBATIM_FILLER_CUE}"
+        ]
         if self.technology:
             parts.append(f"Tema: {self.technology}.")
         return " ".join(parts)
@@ -314,6 +417,8 @@ class TranscriptSession:
         end = max(start + 0.3, float(end))
         segment = {"start": round(start, 3), "end": round(end, 3), "text": spoken}
         self.segments.append(segment)
+        self._vocabulary_ready = False
+        self._muletillas_ready = False
         self.write()
         return segment
 
@@ -332,9 +437,28 @@ class TranscriptSession:
         self._vocabulary_ready = True
         return self.vocabulary
 
+    def analyze_muletillas(self):
+        """Extract filler words (muletillas) once per session after transcription finishes."""
+        if self._muletillas_ready:
+            return self.muletillas
+        spoken = " ".join(segment["text"] for segment in self.segments)
+        try:
+            import vocab_extractor
+
+            if hasattr(vocab_extractor, "extract_muletillas"):
+                self.muletillas = vocab_extractor.extract_muletillas(spoken)
+            else:
+                self.muletillas = extract_muletillas_from_text(spoken)
+        except Exception as exc:
+            print(f"[WARN] Usando extractor local de muletillas: {exc}")
+            self.muletillas = extract_muletillas_from_text(spoken)
+        self._muletillas_ready = True
+        return self.muletillas
+
     def write(self, analyze=False):
         if analyze:
             self.analyze_vocabulary()
+            self.analyze_muletillas()
         payload = {
             "sessionId": self.session_id,
             "candidateName": self.candidate_name,
@@ -344,6 +468,7 @@ class TranscriptSession:
             "savedAt": datetime.now().isoformat(timespec="seconds"),
             "segments": self.segments,
             "vocabulary": self.vocabulary,
+            "muletillas": self.muletillas,
             "videoKey": self.video_key,
             "savedInSystem": bool(self.video_key),
         }
@@ -371,6 +496,7 @@ class TranscriptSession:
             "docxPath": docx_path,
             "segments": self.segments,
             "vocabulary": self.vocabulary,
+            "muletillas": self.muletillas,
         }
 
     def to_vtt(self):
@@ -410,6 +536,15 @@ class TranscriptSession:
             doc.add_paragraph("No se detectó voz durante la grabación.")
         for segment in self.segments:
             doc.add_paragraph(f"[{clock_label(segment['start'])}] {segment['text']}")
+        if self.muletillas.get("total", 0) > 0:
+            doc.add_heading("Muletillas detectadas", level=2)
+            summary = ", ".join(
+                f"{item['phrase']} ({item['count']})"
+                for item in self.muletillas.get("items", [])
+            )
+            doc.add_paragraph(
+                f"Total: {self.muletillas['total']} ({self.muletillas['ratioPct']}% de las palabras) — {summary}"
+            )
         doc.save(path)
 
 
@@ -492,6 +627,7 @@ def list_saved_recordings():
                 "segmentCount": len(payload.get("segments") or []),
                 "segments": payload.get("segments") or [],
                 "vocabulary": payload.get("vocabulary") or [],
+                "muletillas": payload.get("muletillas") or {},
             }
         )
     items.sort(key=lambda item: item.get("savedAt") or "", reverse=True)
