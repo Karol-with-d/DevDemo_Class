@@ -6,14 +6,15 @@ import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
 import { TechnicalTranscript } from "../components/recording/TechnicalTranscript";
 import { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
-import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
+import { EvaluationsOverview } from "../components/review/EvaluationsOverview";
 import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
-import { deleteRecording, playbackUrlForKey } from "../lib/api";
+import { SavedRecording, deleteRecording, playbackUrlForKey } from "../lib/api";
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library" | "review">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "review">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [reviewRecordings, setReviewRecordings] = useState<SavedRecording[] | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const [savedTranscript, setSavedTranscript] = useState<TranscriptSaveResult | null>(null);
@@ -69,6 +70,7 @@ export default function Page() {
     setStream(null);
     setSessionData(null);
     setSavedTranscript(null);
+    setReviewRecordings(null);
     setStep("setup");
   };
 
@@ -85,15 +87,23 @@ export default function Page() {
             <SessionSetup onSessionReady={handleSessionReady} />
             <button
               type="button"
-              onClick={() => setStep("library")}
+              onClick={() => setStep("evaluations")}
               className="mt-4 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed] hover:border-white/30"
             >
-              Grabaciones guardadas
+              Evaluaciones anteriores
             </button>
           </div>
         )}
 
-        {step === "library" && <RecordingsLibrary onBack={() => setStep("setup")} />}
+        {step === "evaluations" && (
+          <EvaluationsOverview
+            onBack={() => setStep("setup")}
+            onSelectCandidate={(recs) => {
+              setReviewRecordings(recs);
+              setStep("review");
+            }}
+          />
+        )}
 
         {step === "calibration" && (
           <div className="calibration-page w-full max-w-4xl rounded-3xl border border-white/10 bg-[#11191e]/90 p-8 shadow-2xl backdrop-blur-md">
@@ -175,10 +185,10 @@ export default function Page() {
             </div>
             <button
               type="button"
-              onClick={() => setStep("library")}
+              onClick={() => setStep("evaluations")}
               className="mb-3 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed]"
             >
-              Ver grabaciones guardadas
+              Ver evaluaciones anteriores
             </button>
             {/* US11: acceso a la auditoría con pestañas (Reporte/Rúbrica/Galería) */}
             <button
@@ -197,13 +207,24 @@ export default function Page() {
           </div>
         )}
 
-        {/* Auditoría (US11): Reporte / Rúbrica / Galería con datos reales.
-            Se accede desde "Grabación finalizada" con el botón "Auditar evaluación". */}
+        {/* Auditoría (US11): Reporte / Rúbrica / Grabaciones con datos reales.
+            Se accede desde "Grabación finalizada" con "Auditar evaluación"
+            (sesión actual) o desde las tarjetas de "Evaluaciones anteriores"
+            (modo historial, con reviewRecordings). */}
         {step === "review" && (
           <div className="w-full">
             <SessionReview
               session={sessionData}
               transcript={savedTranscript}
+              recordings={reviewRecordings ?? undefined}
+              onBack={
+                reviewRecordings
+                  ? () => {
+                      setReviewRecordings(null);
+                      setStep("evaluations");
+                    }
+                  : undefined
+              }
               onNewSession={handleNewSession}
             />
           </div>
