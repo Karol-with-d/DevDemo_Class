@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
 import { NLPVocabularyViewer } from "./NLPVocabularyViewer";
+import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
@@ -523,6 +524,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       {/* Vista expandible opcional con componentes previos */}
       {showAdvancedViews && (
         <div className="space-y-4 pt-2">
+          <PerformanceMetricsChart
+            metrics={dimensions.map((item) => ({
+              indicator: item.title,
+              score: item.adjustedScore,
+              feedback: item.feedback,
+            }))}
+          />
           <HybridRubricEditor
             indicators={legacyIndicators}
             onScoreChange={handleScoreChange}

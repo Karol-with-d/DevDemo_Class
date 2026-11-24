@@ -1,4 +1,4 @@
-'use client';
+"use client";
 
 // ============================================================================
 // US11 · Vista "Ver Rúbrica"
@@ -7,19 +7,19 @@
 //
 // ⚠ DATOS DE MUESTRA: los criterios son fijos (CRITERIA) y los puntajes se
 // simulan con `seedFromId`.
-// TODO(backend): cargar la rúbrica real según tecnología/complejidad y los
-// puntajes registrados por el evaluador durante la sesión.
+// TODO(backend): integrar HybridRubricEditor / ConsolidatedReportView de la
+// rama feature/US10-reporte-cuantitativo (rúbrica UNIVO editable con puntajes
+// reales del evaluador).
 // ============================================================================
 
-import { SessionData } from '../session/SessionForm';
+import { SessionData } from "../session/SessionForm";
 
 interface RubricViewProps {
   session: SessionData | null;
 }
 
-// Misma función de ReportView: genera datos simulados deterministas por sesión.
-// Eliminar al conectar la API (mover a un util compartido si se sigue usando).
-
+// Genera valores deterministas por sesión para la demo.
+// Eliminar al conectar la rúbrica real.
 function seedFromId(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) {
@@ -31,15 +31,15 @@ function seedFromId(id: string): number {
 // MOCK: criterios de ejemplo. La rúbrica real debería variar según la
 // tecnología y complejidad seleccionadas en el Paso 1.
 const CRITERIA = [
-  { name: 'Comunicación verbal', desc: 'Claridad, fluidez y vocabulario técnico', weight: 25 },
-  { name: 'Dominio técnico', desc: 'Precisión de los conceptos demostrados', weight: 30 },
-  { name: 'Resolución de problemas', desc: 'Respuesta ante imprevistos en vivo', weight: 20 },
-  { name: 'Lenguaje corporal y postura', desc: 'Señales EDA y presencia en cámara', weight: 15 },
-  { name: 'Gestión del tiempo', desc: 'Uso del tiempo asignado a la demo', weight: 10 },
+  { name: "Comunicación verbal", desc: "Claridad, fluidez y vocabulario técnico", weight: 25 },
+  { name: "Dominio técnico", desc: "Precisión de los conceptos demostrados", weight: 30 },
+  { name: "Resolución de problemas", desc: "Respuesta ante imprevistos en vivo", weight: 20 },
+  { name: "Lenguaje corporal y postura", desc: "Señales EDA y presencia en cámara", weight: 15 },
+  { name: "Gestión del tiempo", desc: "Uso del tiempo asignado a la demo", weight: 10 },
 ];
 
 export function RubricView({ session }: RubricViewProps) {
-  const seed = seedFromId(session?.sessionId || 'SES-DEMO');
+  const seed = seedFromId(session?.sessionId || "SES-DEMO");
 
   // Puntajes simulados (60-96) por criterio, deterministas por sesión.
   const rows = CRITERIA.map((c, i) => ({
@@ -58,7 +58,7 @@ export function RubricView({ session }: RubricViewProps) {
         <div>
           <span className="eyebrow">Rúbrica de evaluación</span>
           <h3 className="font-manrope text-lg font-bold text-white">
-            {session?.technology || 'Tecnología'} · Nivel {session?.complexity || '—'}
+            {session?.technology || "Tecnología"} · Nivel {session?.complexity || "—"}
           </h3>
         </div>
         <div className="text-right">
