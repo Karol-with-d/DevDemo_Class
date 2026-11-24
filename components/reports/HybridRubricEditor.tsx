@@ -16,16 +16,55 @@ interface Props {
 }
 
 export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange }) => {
+  const averageScore =
+    indicators.length > 0
+      ? Math.round(
+          indicators.reduce((acc, item) => acc + item.adjustedScore, 0) / indicators.length
+        )
+      : 0;
+
+  const handleDownloadRubric = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      averageScore,
+      indicators,
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `rubrica-evaluativa-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg">
-      <div className="flex justify-between items-center mb-4">
+      <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
         <div>
           <h3 className="text-lg font-semibold text-emerald-400">Rúbrica Evaluativa Híbrida (IA + Ajuste Manual)</h3>
           <p className="text-xs text-slate-400">Valores autocompletados por IA. Deslice o edite el valor numérico para calibrar la nota final.</p>
         </div>
-        <span className="text-xs bg-emerald-500/10 text-emerald-300 px-3 py-1 rounded-full border border-emerald-500/30">
-          Promedio Final: {Math.round(indicators.reduce((acc, item) => acc + item.adjustedScore, 0) / indicators.length)}%
-        </span>
+
+        <div className="flex items-center gap-3">
+          <span className="text-xs bg-emerald-500/10 text-emerald-300 px-3 py-1 rounded-full border border-emerald-500/30">
+            Promedio Final: {averageScore}%
+          </span>
+
+          <button
+            type="button"
+            onClick={handleDownloadRubric}
+            className="text-xs bg-emerald-500 text-slate-950 font-semibold px-3.5 py-1.5 rounded-lg hover:bg-emerald-400 transition cursor-pointer"
+          >
+            Descargar Rúbrica
+          </button>
+        </div>
       </div>
 
       <div className="space-y-5">
