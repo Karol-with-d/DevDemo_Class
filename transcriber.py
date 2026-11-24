@@ -451,6 +451,26 @@ def attach_video_key(session_id, video_key):
     return payload
 
 
+def attach_evaluation_report(session_id, evaluation_data):
+    session_id = safe_session_id(session_id)
+    directory = os.path.join(RECORDINGS_DIR, session_id)
+    os.makedirs(directory, exist_ok=True)
+    path = _session_json_path(session_id)
+    payload = load_session_record(session_id) or {
+        "sessionId": session_id,
+        "candidateName": evaluation_data.get("candidateName", "Candidato"),
+        "evaluatorName": evaluation_data.get("evaluatorName", ""),
+        "technology": evaluation_data.get("technology", ""),
+        "complexity": evaluation_data.get("complexity", ""),
+        "segments": [],
+    }
+    payload["evaluation"] = evaluation_data
+    payload["evaluatedAt"] = evaluation_data.get("savedAt") or datetime.now().isoformat(timespec="seconds")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    return payload
+
+
 def list_saved_recordings():
     items = []
     if not os.path.isdir(RECORDINGS_DIR):

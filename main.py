@@ -28,13 +28,20 @@ import time
 from live_caption import relay_live_transcription
 from transcriber import (
     TranscriptSession,
+    attach_evaluation_report,
     attach_video_key,
     delete_local_session,
     list_saved_recordings,
     load_session_record,
     transcribe_speed_demo,
 )
-from s3_storage import delete_video_object, read_video_object, upload_video_bytes
+from s3_storage import (
+    delete_video_object,
+    read_evaluation_json,
+    read_video_object,
+    upload_evaluation_json,
+    upload_video_bytes,
+)
 
 # The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
 active_transcripts = {}
@@ -146,6 +153,39 @@ async def upload_video(
 @app.get("/recordings")
 def get_recordings():
     return {"recordings": list_saved_recordings()}
+
+
+@app.post("/evaluations/{session_id}")
+async def save_evaluation(session_id: str, payload: dict):
+    if not payload:
+        raise HTTPException(status_code=400, detail="Los datos de evaluación están vacíos.")
+    try:
+        s3_res = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[ERROR] Guardando evaluación en S3: {exc}")
+        raise HTTPException(status_code=502, detail="No se pudo guardar la evaluación en S3.") from exc
+
+    attach_evaluation_report(session_id, payload)
+    return {"ok": True, "sessionId": session_id, **s3_res}
+
+
+@app.get("/evaluations/{session_id}")
+async def get_evaluation(session_id: str):
+    try:
+        s3_eval = await asyncio.to_thread(read_evaluation_json, session_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if s3_eval is not None:
+        return {"ok": True, "source": "s3", "evaluation": s3_eval}
+
+    local_record = load_session_record(session_id)
+    if local_record and local_record.get("evaluation"):
+        return {"ok": True, "source": "local", "evaluation": local_record["evaluation"]}
+
+    return {"ok": True, "source": None, "evaluation": None}
 
 
 @app.get("/video")
