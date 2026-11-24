@@ -4,14 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
-import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
 import { ConsolidatedReportView } from "../components/reports/ConsolidatedReportView";
+import { EvaluationsOverview } from "../components/review/EvaluationsOverview";
+import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
-import Link from "next/link";
+import { SavedRecording } from "../lib/api";
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library" | "evaluation">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "history" | "evaluation">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [reviewRecordings, setReviewRecordings] = useState<SavedRecording[] | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -70,6 +72,7 @@ export default function Page() {
     setAudioContext(null);
     setStream(null);
     setSessionData(null);
+    setReviewRecordings(null);
     setStep("setup");
   };
 
@@ -86,21 +89,38 @@ export default function Page() {
             <SessionSetup onSessionReady={handleSessionReady} />
             <button
               type="button"
-              onClick={() => setStep("library")}
+              onClick={() => setStep("evaluations")}
               className="mt-4 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed] hover:border-white/30"
             >
-              Grabaciones guardadas
+              Evaluaciones anteriores
             </button>
-            <Link
-              href="/gpt-transcribe"
-              className="mt-2 block w-full rounded-xl border border-[#9ce4c1]/30 py-3.5 text-center text-sm font-semibold text-[#9ce4c1] hover:bg-[#9ce4c1]/10"
-            >
-              Probar velocidad de GPT Transcribe
-            </Link>
           </div>
         )}
 
-        {step === "library" && <RecordingsLibrary onBack={() => setStep("setup")} />}
+        {step === "evaluations" && (
+          <EvaluationsOverview
+            onBack={() => setStep("setup")}
+            onSelectCandidate={(recordings) => {
+              setReviewRecordings(recordings);
+              setStep("history");
+            }}
+          />
+        )}
+
+        {step === "history" && (
+          <div className="w-full">
+            <SessionReview
+              session={sessionData}
+              transcript={null}
+              recordings={reviewRecordings ?? undefined}
+              onBack={() => {
+                setReviewRecordings(null);
+                setStep("evaluations");
+              }}
+              onNewSession={handleNewSession}
+            />
+          </div>
+        )}
 
         {step === "calibration" && (
           <div className="calibration-page w-full max-w-4xl rounded-3xl border border-white/10 bg-[#11191e]/90 p-8 shadow-2xl backdrop-blur-md">
