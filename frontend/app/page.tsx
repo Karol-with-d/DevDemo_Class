@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
+import type { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
 import { ConsolidatedReportView } from "../components/reports/ConsolidatedReportView";
 import { EvaluationsOverview } from "../components/review/EvaluationsOverview";
 import { SessionReview } from "../components/review/SessionReview";
@@ -13,6 +14,7 @@ import { SavedRecording } from "../lib/api";
 export default function Page() {
   const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "history" | "evaluation">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [videoSaveMessage, setVideoSaveMessage] = useState("");
   const [reviewRecordings, setReviewRecordings] = useState<SavedRecording[] | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
@@ -60,7 +62,14 @@ export default function Page() {
     setStep("recording");
   };
 
-  const handleStopRecording = () => {
+  const handleStopRecording = (result: TranscriptSaveResult) => {
+    if (result.videoStorage === "local") {
+      setVideoSaveMessage("El video se guardó en este equipo.");
+    } else if (result.videoUrl) {
+      setVideoSaveMessage("El video se guardó correctamente.");
+    } else {
+      setVideoSaveMessage("No se pudo guardar el video.");
+    }
     setStep("finished");
   };
 
@@ -144,8 +153,7 @@ export default function Page() {
             </div>
             <h2 className="mb-2 text-2xl font-bold">Grabación finalizada</h2>
             <p className="mb-8 text-sm text-[#82918f]">
-              La sesión del candidato{" "}
-              <span className="font-semibold text-[#e9f0ed]">{sessionData?.candidateName || "registrado"}</span> se ha guardado correctamente.
+              {videoSaveMessage}
             </p>
             <div className="flex w-full flex-col gap-3">
               <button

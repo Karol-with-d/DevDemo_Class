@@ -24,6 +24,8 @@ export type TranscriptSegment = {
   text: string;
 };
 
+export type VideoStorage = "s3" | "local";
+
 export type SavedRecording = {
   sessionId: string;
   candidateName: string;
@@ -102,11 +104,15 @@ export function playbackUrlForKey(key: string, download = false) {
 
 export async function uploadRecording(
   blob: Blob,
-  sessionId: string,
-): Promise<{ playbackUrl: string; key: string | null }> {
+  session: Pick<SavedRecording, "sessionId" | "candidateName" | "evaluatorName" | "technology" | "complexity">,
+): Promise<{ playbackUrl: string; key: string | null; source?: VideoStorage }> {
   const extension = blob.type.includes("mp4") ? "mp4" : "webm";
   const body = new FormData();
-  body.append("sessionId", sessionId);
+  body.append("sessionId", session.sessionId);
+  body.append("candidateName", session.candidateName);
+  body.append("evaluatorName", session.evaluatorName);
+  body.append("technology", session.technology);
+  body.append("complexity", session.complexity);
   body.append("file", blob, `recording.${extension}`);
 
   const response = await fetch(`${API_BASE}/upload-video`, {
@@ -118,14 +124,14 @@ export async function uploadRecording(
     throw new Error(await errorMessage(response, `No se pudo subir el video (${response.status})`));
   }
 
-  const payload = (await response.json()) as { video_url?: string; key?: string };
+  const payload = (await response.json()) as { video_url?: string; key?: string; source?: VideoStorage };
   if (payload.key) {
-    return { playbackUrl: playbackUrlForKey(payload.key), key: payload.key };
+    return { playbackUrl: playbackUrlForKey(payload.key), key: payload.key, source: payload.source };
   }
   if (!payload.video_url) {
     throw new Error("El backend no devolvió video_url");
   }
-  return { playbackUrl: payload.video_url, key: null };
+  return { playbackUrl: payload.video_url, key: null, source: payload.source };
 }
 
 export async function listRecordings(): Promise<SavedRecording[]> {

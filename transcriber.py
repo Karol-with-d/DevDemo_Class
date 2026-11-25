@@ -477,7 +477,7 @@ class TranscriptSession:
         vtt_path = os.path.join(self.directory, "transcript.vtt")
         txt_path = os.path.join(self.directory, "transcript.txt")
         saved = load_session_record(self.session_id) or {}
-        for field in ("evaluation", "evaluationStorage", "evaluatedAt"):
+        for field in ("evaluation", "evaluationStorage", "evaluatedAt", "videoKey", "savedInSystem"):
             if field in saved:
                 payload[field] = saved[field]
         _write_session_json(json_path, payload)
@@ -583,7 +583,7 @@ def load_session_record(session_id):
     return payload if isinstance(payload, dict) else None
 
 
-def attach_video_key(session_id, video_key):
+def attach_video_key(session_id, video_key, *, metadata=None):
     session_id = safe_session_id(session_id)
     directory = os.path.join(RECORDINGS_DIR, session_id)
     os.makedirs(directory, exist_ok=True)
@@ -595,6 +595,7 @@ def attach_video_key(session_id, video_key):
         "technology": "",
         "complexity": "",
         "segments": [],
+        **(metadata or {}),
     }
     payload["sessionId"] = session_id
     payload["videoKey"] = video_key

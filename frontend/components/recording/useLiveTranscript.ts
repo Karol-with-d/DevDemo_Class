@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { VideoStorage } from "../../lib/api";
 import type { SessionData } from "../session/SessionForm";
 
 export interface TranscriptSegment {
@@ -23,6 +24,7 @@ export interface TranscriptSaveResult {
   docxPath: string | null;
   videoUrl?: string | null;
   videoKey?: string | null;
+  videoStorage?: VideoStorage;
   vocabulary?: TechnicalTerm[];
 }
 

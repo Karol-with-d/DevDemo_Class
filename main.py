@@ -18,7 +18,7 @@ if __name__ == "__main__" and _port_is_open(HOST, PORT):
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 import asyncio
 import json
 import math
@@ -26,6 +26,7 @@ import os
 import time
 
 from live_caption import relay_live_transcription
+from local_video_storage import LOCAL_VIDEO_PREFIX, local_video_path, store_local_video
 from rubric import suggest_rubric
 from transcriber import (
     TranscriptSession,
@@ -34,11 +35,13 @@ from transcriber import (
     delete_local_session,
     list_saved_recordings,
     load_session_record,
+    safe_session_id,
     transcribe_speed_demo,
 )
 from s3_storage import (
     delete_video_object,
     is_s3_configured,
+    media_type_for,
     read_evaluation_json,
     read_video_object,
     upload_evaluation_json,
@@ -130,26 +133,62 @@ def read_root():
 async def upload_video(
     file: UploadFile = File(...),
     sessionId: str = Form(""),
+    candidateName: str = Form(""),
+    evaluatorName: str = Form(""),
+    technology: str = Form(""),
+    complexity: str = Form(""),
 ):
-    data = await file.read()
-    if not data:
+    if not await file.read(1):
         raise HTTPException(status_code=400, detail="El archivo de video está vacío.")
+    await file.seek(0)
+    session_id = safe_session_id(sessionId)
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+    source = "s3" if is_s3_configured() else "local"
+    if source == "s3":
+        try:
+            result = await asyncio.to_thread(
+                upload_video_bytes, await file.read(), session_id, content_type, filename,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            print(f"[ERROR] Subida a S3: {exc}")
+            raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
+    else:
+        try:
+            result = await asyncio.to_thread(
+                store_local_video, file.file, session_id, content_type, filename,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"[ERROR] Guardando video local: {exc}")
+            raise HTTPException(status_code=500, detail="No se pudo guardar el video localmente.") from exc
+
+    previous_key = (load_session_record(session_id) or {}).get("videoKey")
     try:
-        result = await asyncio.to_thread(
-            upload_video_bytes,
-            data,
-            sessionId,
-            file.content_type or "video/webm",
-            file.filename or "recording.webm",
-        )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        print(f"[ERROR] Subida a S3: {exc}")
-        raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
-    attach_video_key(sessionId, result["key"])
-    result["savedInSystem"] = True
-    return result
+        if source == "local" and not local_video_path(result["key"]).is_file():
+            raise FileNotFoundError("El video local ya no está disponible.")
+        attach_video_key(session_id, result["key"], metadata={
+            "candidateName": candidateName or "Candidato",
+            "evaluatorName": evaluatorName,
+            "technology": technology,
+            "complexity": complexity,
+        })
+    except (OSError, ValueError) as exc:
+        if source == "local":
+            try:
+                local_video_path(result["key"]).unlink(missing_ok=True)
+            except (OSError, ValueError) as cleanup_error:
+                print(f"[WARN] No se pudo eliminar el video sin registrar: {cleanup_error}")
+        print(f"[ERROR] Actualizando el historial del video: {exc}")
+        raise HTTPException(status_code=500, detail="No se pudo registrar el video en el historial.") from exc
+
+    if previous_key and previous_key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            local_video_path(previous_key).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            print(f"[WARN] No se pudo eliminar la versión anterior del video local: {exc}")
+    return {**result, "source": source, "savedInSystem": True}
 
 
 @app.get("/recordings")
@@ -226,6 +265,20 @@ async def get_rubric_suggestions(session_id: str):
 
 @app.get("/video")
 async def play_video(key: str, download: bool = False):
+    if key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            path = local_video_path(key)
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="No se encontró el video local.")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="No se encontró el video local.") from exc
+        return FileResponse(
+            path,
+            media_type=media_type_for(path.name),
+            filename=path.name,
+            content_disposition_type="attachment" if download else "inline",
+            headers={"Cache-Control": "private, no-cache"},
+        )
     try:
         data, content_type = await asyncio.to_thread(read_video_object, key)
     except RuntimeError as exc:
@@ -247,7 +300,12 @@ async def delete_recording(session_id: str):
     if not record:
         raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
     video_key = record.get("videoKey")
-    if video_key:
+    if video_key and video_key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            local_video_path(video_key).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
+    elif video_key:
         try:
             await asyncio.to_thread(delete_video_object, video_key)
         except RuntimeError as exc:
@@ -262,11 +320,8 @@ async def delete_recording(session_id: str):
         delete_local_session(session_id)
     except OSError as exc:
         print(f"[WARN] No se vació del todo la carpeta local: {exc}")
-        if load_session_record(session_id):
-            raise HTTPException(
-                status_code=500,
-                detail="El video se quitó de S3, pero Windows bloqueó la carpeta local. Recarga la biblioteca.",
-            ) from exc
+    if load_session_record(session_id):
+        raise HTTPException(status_code=500, detail="No se pudo quitar la sesión del historial.")
     return {"ok": True, "sessionId": session_id}
 
 
