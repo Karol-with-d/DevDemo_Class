@@ -52,7 +52,7 @@ const VERDICT_OPTIONS: VerdictOption[] = [
 const QUICK_TAGS = [
   "Buena activación de saberes previos",
   "Manejo claro del tiempo y cierre",
-  "Buen dominio técnico y vocabulario PNL",
+  "Buen dominio técnico y vocabulario clave",
   "Fomentar mayor participación estudiantil",
   "Reforzar retroalimentación de errores",
 ];
@@ -120,7 +120,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const [savedPayload, setSavedPayload] = useState<string | null>(null);
   const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [showAdvancedViews, setShowAdvancedViews] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
     type: "success" | "error" | "info";
     text: string;
@@ -446,7 +445,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         <div>
           <h2 className="text-2xl font-bold text-white">Consolidado de Evaluación</h2>
           <p className="text-xs text-slate-400">
-            Guía de Observación UNIVO · Escala E / MB / B / R / NM + Reporte Cuantitativo y PNL
+            Guía de Observación UNIVO · Escala E / MB / B / R / NM · Resumen Cuantitativo y Vocabulario Técnico
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -481,14 +480,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
             </span>
           ))}
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowAdvancedViews((v) => !v)}
-          className="text-xs px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
-        >
-          {showAdvancedViews ? "Ocultar detalle PNL/Slider" : "Ver detalle PNL/Slider"}
-        </button>
       </div>
 
       <div className="space-y-2 text-sm text-slate-300">
@@ -563,25 +554,22 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         ))}
       </div>
 
-      {/* Vista expandible opcional con componentes previos */}
-      {showAdvancedViews && (
-        <div className="space-y-4 pt-2">
-          {legacyIndicators.length > 0 && (
-            <>
-              <PerformanceMetricsChart
-                metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
-                  { indicator: label, score: adjustedScore, feedback }
-                ))}
-              />
-              <HybridRubricEditor
-                indicators={legacyIndicators}
-                onScoreChange={handleScoreChange}
-              />
-            </>
-          )}
-          {hasTranscript && <TechnicalTranscript segments={segments} vocabulary={vocabulary} />}
-        </div>
-      )}
+      <div className="space-y-4 pt-2">
+        {legacyIndicators.length > 0 && (
+          <>
+            <PerformanceMetricsChart
+              metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
+                { indicator: label, score: adjustedScore, feedback }
+              ))}
+            />
+            <HybridRubricEditor
+              indicators={legacyIndicators}
+              onScoreChange={handleScoreChange}
+            />
+          </>
+        )}
+        {hasTranscript && <TechnicalTranscript segments={segments} vocabulary={vocabulary} />}
+      </div>
 
       {/* Dictamen, observaciones y guardado */}
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
@@ -652,14 +640,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               {isSaving ? "Guardando evaluación..." : "Guardar Evaluación Consolidada"}
             </button>
 
-            <button
-              type="button"
-              onClick={handleDownloadRubric}
-              disabled={suggesting}
-              className="px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-slate-950 hover:bg-slate-800 text-emerald-300 font-medium text-sm transition-colors cursor-pointer"
-            >
-              Descargar Rúbrica
-            </button>
           </div>
 
           {statusMessage && (
