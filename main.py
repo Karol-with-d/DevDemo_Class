@@ -43,6 +43,8 @@ from transcriber import (
     transcribe_speed_demo,
 )
 from s3_storage import (
+    allow_local_evaluation_fallback,
+    allow_local_video_fallback,
     delete_video_object,
     is_s3_configured,
     media_type_for,
@@ -233,6 +235,8 @@ async def upload_video(
         "complexity": complexity,
     }
 
+    source = "local" if (not is_s3_configured() and allow_local_video_fallback()) else "s3"
+
     audio_bytes = None
     audio_filename = "audio.webm"
     audio_content_type = "audio/webm"
@@ -244,7 +248,7 @@ async def upload_video(
             audio_content_type = audio.content_type or "audio/webm"
 
     transcription_task = None
-    if audio_bytes:
+    if audio_bytes and (source == "local" or is_s3_configured()):
         # Start full-audio transcription right away so it overlaps with S3/disk storage.
         transcription_task = _schedule_final_transcription(
             session_id,
@@ -255,7 +259,6 @@ async def upload_video(
             duration_seconds=durationSeconds,
         )
 
-    source = "s3" if is_s3_configured() else "local"
     video_bytes = None
     try:
         if source == "s3":
@@ -331,12 +334,12 @@ async def save_evaluation(session_id: str, payload: dict):
     if not payload:
         raise HTTPException(status_code=400, detail="Los datos de evaluación están vacíos.")
 
-    source = "local"
+    use_local = (not is_s3_configured()) and allow_local_evaluation_fallback()
+    source = "local" if use_local else "s3"
     result = {"key": None, "savedInS3": False}
-    if is_s3_configured():
+    if source == "s3":
         try:
             result = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
-            source = "s3"
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:

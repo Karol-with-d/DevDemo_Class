@@ -23,6 +23,20 @@ def is_s3_configured():
     return all(os.getenv(name) for name in REQUIRED_ENV)
 
 
+def _env_flag(name):
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_local_video_fallback():
+    """Opt-in local video storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_VIDEO_FALLBACK")
+
+
+def allow_local_evaluation_fallback():
+    """Opt-in local evaluation storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_EVALUATION_FALLBACK")
+
+
 def _require_settings():
     missing = [name for name in REQUIRED_ENV if not os.getenv(name)]
     if missing:
