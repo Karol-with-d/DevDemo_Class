@@ -31,7 +31,7 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
             Rúbrica Evaluativa Híbrida (IA + Ajuste Manual)
           </h3>
           <p className="text-xs text-slate-400">
-            Valores autocompletados por IA. Deslice o edite el valor numérico para calibrar la nota final.
+            Valores autocompletados por IA. Deslice la barra o edite el valor numérico para calibrar la nota final.
           </p>
         </div>
 
@@ -60,7 +60,6 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
                   )}
                 </div>
 
-                {/* Control numérico editable (US9) */}
                 <div className="flex items-center gap-2">
                   <input
                     type="number"
@@ -79,7 +78,6 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
                 </div>
               </div>
 
-              {/* Barra visual + Slider interactivo (US9 + US10) */}
               <div className="flex items-center gap-3">
                 <input
                   type="range"

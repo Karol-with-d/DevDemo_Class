@@ -461,7 +461,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   return (
     <div className="mx-auto max-w-5xl space-y-6 p-6">
-      {/* Encabezado + KPIs rápidos + único botón de descarga de rúbrica */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <h2 className="text-2xl font-bold text-white">
@@ -489,7 +488,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
-      {/* Barra de distribución por escala */}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 p-4">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="mr-1 text-slate-400">Distribución:</span>
@@ -505,7 +503,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
-      {/* Rúbrica ágil por dimensiones UNIVO */}
       <div className="space-y-3">
         {dimensions.map((item) => (
           <div
@@ -563,7 +560,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         ))}
       </div>
 
-      {/* Detalle completo visible de una vez (sin botón desplegable) */}
+      {/* Barras deslizables y vocabulario técnico visibles de un solo */}
       <div className="space-y-4 pt-2">
         <HybridRubricEditor
           indicators={legacyIndicators}
@@ -575,7 +572,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         />
       </div>
 
-      {/* Dictamen rápido + Chips + Observaciones y Guardado en S3 */}
       <div className="space-y-4 rounded-xl border border-emerald-500/30 bg-slate-900 p-6 text-white shadow-lg">
         <div>
           <h3 className="text-base font-semibold text-emerald-400">
@@ -587,7 +583,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           </p>
         </div>
 
-        {/* Selector rápido de dictamen */}
         <div className="flex flex-wrap gap-2">
           {VERDICT_OPTIONS.map((option) => (
             <button
@@ -605,7 +600,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           ))}
         </div>
 
-        {/* Etiquetas rápidas de un clic */}
         <div className="flex flex-wrap gap-1.5">
           {QUICK_TAGS.map((tag) => {
             const selected = qualitativeNotes.includes(tag);
