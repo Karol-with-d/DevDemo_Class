@@ -16,14 +16,14 @@ export const CameraPreview = ({ stream }: Props) => {
   }, [stream]);
 
   return (
-    <div className="relative w-full aspect-video bg-black rounded-lg overflow-hidden border border-gray-800 flex items-center justify-center">
+    <div className="camera-preview relative w-full aspect-video bg-black rounded-lg overflow-hidden border border-gray-800 flex items-center justify-center">
       {stream ? (
         <video
           ref={videoRef}
           autoPlay
           playsInline
           muted
-          className="w-full h-full object-cover"
+          className="camera-feed w-full h-full object-cover"
         />
       ) : (
         <div className="text-gray-400 text-sm">

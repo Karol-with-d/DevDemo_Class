@@ -12,7 +12,7 @@ export const AudioLevelIndicator = ({ stream }: Props) => {
     if (!stream) return;
 
     // Inicializa el analizador de audio del navegador
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
     const analyser = audioContext.createAnalyser();
     const microphone = audioContext.createMediaStreamSource(stream);
     const javascriptNode = audioContext.createScriptProcessor(2048, 1, 1);
