@@ -12,6 +12,7 @@
 import { SessionData } from "../session/SessionForm";
 import { TranscriptSaveResult } from "../recording/useLiveTranscript";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
+import { VideoMetricsPanel } from "../reports/VideoMetricsPanel";
 
 interface ReportViewProps {
   session: SessionData | null;
@@ -65,11 +66,21 @@ export function ReportView({ session, transcript }: ReportViewProps) {
         ))}
       </div>
 
+      {/* Análisis de video y muletillas */}
+      <VideoMetricsPanel
+        videoMetrics={transcript?.videoMetrics}
+        muletillas={transcript?.muletillas}
+      />
+
       {/* Transcripción real con vocabulario resaltado (US08) */}
       <div className="rounded-2xl border border-[rgba(194,220,213,0.12)] bg-[#11191e] p-6 shadow-xl">
         <span className="eyebrow">Transcripción y vocabulario técnico</span>
         {segments.length > 0 || vocabulary.length > 0 ? (
-          <TechnicalTranscript segments={segments} vocabulary={vocabulary} />
+          <TechnicalTranscript
+            segments={segments}
+            vocabulary={vocabulary}
+            muletillas={transcript?.muletillas}
+          />
         ) : (
           <p className="mt-3 text-sm text-[#82918f]">
             Esta sesión no tiene transcripción guardada. Completa una grabación

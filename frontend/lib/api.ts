@@ -27,6 +27,55 @@ export type TranscriptSegment = {
 
 export type VideoStorage = "s3" | "local";
 
+export type VideoIncident = {
+  type: string;
+  label: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+};
+
+export type VideoMetrics = {
+  framesAnalyzed: number;
+  durationAnalyzedSec: number;
+  personDetectedPct: number;
+  orientation: {
+    facingCameraPct: number;
+    profilePct: number;
+    backTurnedPct: number;
+    headDownPct: number;
+  };
+  eyeContact: {
+    directPct: number;
+    gazeAwayPct: number;
+    eyesClosedPct: number;
+    lostDueToTurnPct: number;
+  };
+  expression: {
+    cordialPct: number;
+    neutralPct: number;
+  };
+  mobility: {
+    activePct: number;
+    level: string;
+  };
+  gestures: {
+    visiblePct: number;
+    activeWhenVisiblePct: number;
+    handsMostlyOutOfFrame: boolean;
+    level: string;
+  };
+  incidents: VideoIncident[];
+};
+
+export type MuletillasSummary = {
+  total?: number;
+  totalWords?: number;
+  ratioPct?: number;
+  breakdown?: Record<string, number>;
+  items?: { phrase: string; count: number }[];
+};
+
 export type SavedRecording = {
   sessionId: string;
   candidateName: string;
@@ -39,6 +88,8 @@ export type SavedRecording = {
   segmentCount: number;
   segments?: TranscriptSegment[];
   vocabulary?: TechnicalTerm[];
+  muletillas?: MuletillasSummary;
+  videoMetrics?: VideoMetrics | null;
 };
 
 export type RubricSuggestion = {
@@ -64,6 +115,8 @@ type EvaluationContext = {
   } | null;
   segments: TranscriptSegment[];
   vocabulary: TechnicalTerm[];
+  muletillas?: MuletillasSummary;
+  videoMetrics?: VideoMetrics | null;
 };
 
 export async function getEvaluation(sessionId: string, signal?: AbortSignal): Promise<EvaluationContext> {

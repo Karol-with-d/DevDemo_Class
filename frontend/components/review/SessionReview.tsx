@@ -45,6 +45,8 @@ function recordingToTranscript(rec: SavedRecording): TranscriptSaveResult {
   return {
     segments: (rec.segments ?? []).map((seg) => ({ ...seg, end: seg.end ?? seg.start })),
     vocabulary: rec.vocabulary ?? [],
+    muletillas: rec.muletillas,
+    videoMetrics: rec.videoMetrics ?? null,
     videoKey: rec.videoKey,
     videoUrl: rec.videoKey ? playbackUrlForKey(rec.videoKey) : null,
     jsonPath: null,

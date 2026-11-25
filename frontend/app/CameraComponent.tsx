@@ -15,6 +15,7 @@ interface Metrics {
 
 interface CameraComponentProps {
   stream?: MediaStream | null;
+  sessionId?: string;
   embedded?: boolean;
   caption?: string;
   previousCaption?: string;
@@ -23,12 +24,14 @@ interface CameraComponentProps {
 
 export default function CameraComponent({
   stream: providedStream,
+  sessionId,
   embedded = false,
   caption = "",
   previousCaption = "",
   captionStatus,
 }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     movilidad: "Conectando al backend...",
     gesticulacion: "Conectando al backend...",
@@ -69,8 +72,12 @@ export default function CameraComponent({
       if (!isMounted) return;
 
       try {
-        const socket = new WebSocket("ws://127.0.0.1:8000/ws/pose-analysis");
+        const wsUrl = sessionId
+          ? `ws://127.0.0.1:8000/ws/pose-analysis?sessionId=${encodeURIComponent(sessionId)}`
+          : "ws://127.0.0.1:8000/ws/pose-analysis";
+        const socket = new WebSocket(wsUrl);
         ws = socket;
+        wsRef.current = socket;
 
         socket.onopen = () => {
           if (!isMounted || ws !== socket) return;
@@ -212,13 +219,22 @@ export default function CameraComponent({
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) {
         releaseSocket(ws);
+        if (wsRef.current === ws) wsRef.current = null;
         ws = null;
       }
       if (ownsStream && stream) {
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [providedStream]);
+  }, [providedStream, sessionId]);
+
+  useEffect(() => {
+    if (captionStatus !== "saving") return;
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "flush" }));
+    }
+  }, [captionStatus]);
 
   return (
     <div className={`analysis-shell flex flex-col md:flex-row gap-4 text-white ${embedded ? "min-h-0 bg-transparent p-0" : "min-h-screen bg-gray-950 p-3 sm:p-6"}`}>

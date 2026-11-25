@@ -1,4 +1,4 @@
-import React from 'react';
+import React from "react";
 
 interface Props {
   transcript: string;
@@ -22,7 +22,7 @@ export const NLPVocabularyViewer: React.FC<Props> = ({ transcript, technicalTerm
             next.push(
               <mark
                 key={`term-${termIndex}-${partIndex}-${i}`}
-                className="bg-emerald-500/20 text-emerald-300 px-1 py-0.5 rounded border border-emerald-500/40 font-semibold"
+                className="rounded border border-emerald-500/40 bg-emerald-500/20 px-1 py-0.5 font-semibold text-emerald-300"
               >
                 {chunk}
               </mark>
@@ -39,10 +39,14 @@ export const NLPVocabularyViewer: React.FC<Props> = ({ transcript, technicalTerm
   };
 
   return (
-    <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg mt-6">
-      <h3 className="text-lg font-semibold text-emerald-400 mb-2">Reporte de Vocabulario Técnico (PNL)</h3>
-      <p className="text-xs text-slate-400 mb-4">Transcripción de la sesión con detección automática de términos especializados.</p>
-      <div className="bg-slate-950 p-4 rounded-lg text-slate-300 leading-relaxed text-sm border border-slate-800">
+    <div className="mt-6 rounded-xl border border-emerald-500/30 bg-slate-900 p-6 text-white shadow-lg">
+      <h3 className="mb-2 text-lg font-semibold text-emerald-400">
+        Vocabulario Técnico Detectado
+      </h3>
+      <p className="mb-4 text-xs text-slate-400">
+        Transcripción de la sesión con detección automática de palabras clave técnicas.
+      </p>
+      <div className="rounded-lg border border-slate-800 bg-slate-950 p-4 text-sm leading-relaxed text-slate-300">
         {renderHighlightedText()}
       </div>
     </div>

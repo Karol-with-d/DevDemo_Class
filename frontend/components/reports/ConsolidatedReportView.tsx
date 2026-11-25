@@ -3,10 +3,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { evaluateVocabLevel } from "../../lib/vocabLevel";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
-import { getEvaluation, getRubricSuggestions, saveEvaluation, type RubricSuggestion, type TechnicalTerm, type TranscriptSegment } from "../../lib/api";
+import {
+  getEvaluation,
+  getRubricSuggestions,
+  saveEvaluation,
+  type MuletillasSummary,
+  type RubricSuggestion,
+  type TechnicalTerm,
+  type TranscriptSegment,
+  type VideoMetrics,
+} from "../../lib/api";
 import rubric from "../../lib/univo-rubric.json";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
+import { VideoMetricsPanel } from "./VideoMetricsPanel";
 
 export type UnivoScale = "E" | "MB" | "B" | "R" | "NM";
 export type VerdictOption =
@@ -55,7 +65,7 @@ const VERDICT_OPTIONS: VerdictOption[] = [
 const QUICK_TAGS = [
   "Buena activación de saberes previos",
   "Manejo claro del tiempo y cierre",
-  "Buen dominio técnico y vocabulario PNL",
+  "Buen dominio técnico y vocabulario clave",
   "Fomentar mayor participación estudiantil",
   "Reforzar retroalimentación de errores",
 ];
@@ -125,7 +135,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const [savedPayload, setSavedPayload] = useState<string | null>(null);
   const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [showAdvancedViews, setShowAdvancedViews] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
     type: "success" | "error" | "info";
     text: string;
@@ -133,6 +142,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [vocabulary, setVocabulary] = useState<TechnicalTerm[]>([]);
+  const [muletillas, setMuletillas] = useState<MuletillasSummary | null>(null);
+  const [videoMetrics, setVideoMetrics] = useState<VideoMetrics | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [suggesting, setSuggesting] = useState(false);
@@ -178,6 +189,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
       setSegments(context.segments);
       setVocabulary(context.vocabulary);
+      setMuletillas(context.muletillas ?? null);
+      setVideoMetrics(context.videoMetrics ?? null);
       const saved = context.evaluation;
       if (saved) {
         const scores = Array.isArray(saved.rubricScores) ? saved.rubricScores : [];
@@ -207,7 +220,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       }
 
       setLoadState("ready");
-      if (!saved && autoSuggest && context.segments.some(({ text }) => text.trim())) {
+      const hasEvidence =
+        context.segments.some(({ text }) => text.trim()) || Boolean(context.videoMetrics);
+      if (!saved && autoSuggest && hasEvidence) {
         await requestSuggestions(signal);
       }
     }
@@ -239,6 +254,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   );
 
   const hasTranscript = segments.some(({ text }) => text.trim());
+  const hasAnalysisData = hasTranscript || Boolean(videoMetrics);
   const terms = vocabulary.map(({ term }) => term);
   const vocabGate = useMemo(
     () => evaluateVocabLevel(complexity, vocabulary.length),
@@ -260,6 +276,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       vocabLevelMet: vocabGate.ok,
       vocabLevelRule: vocabGate.rule,
     },
+    videoMetrics,
+    muletillas,
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
       ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback, evidence }) => ({
@@ -463,7 +481,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         <div>
           <h2 className="text-2xl font-bold text-white">Consolidado de Evaluación</h2>
           <p className="text-xs text-slate-400">
-            Guía de Observación UNIVO · Escala E / MB / B / R / NM + Reporte Cuantitativo y PNL
+            Guía de Observación UNIVO · Escala E / MB / B / R / NM · Resumen Cuantitativo y Vocabulario Técnico
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -498,7 +516,11 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       </div>
 
       {hasTranscript && (
-        <TechnicalTranscript segments={segments} vocabulary={vocabulary} />
+        <TechnicalTranscript
+          segments={segments}
+          vocabulary={vocabulary}
+          muletillas={muletillas}
+        />
       )}
 
       {/* Barra de resumen cuantitativo + vista detalle */}
@@ -515,22 +537,16 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
             </span>
           ))}
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowAdvancedViews((v) => !v)}
-          className="text-xs px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
-        >
-          {showAdvancedViews ? "Ocultar detalle PNL/Slider" : "Ver detalle PNL/Slider"}
-        </button>
       </div>
+
+      <VideoMetricsPanel videoMetrics={videoMetrics} muletillas={muletillas} />
 
       <div className="space-y-2 text-sm text-slate-300">
         <p>Revisa las sugerencias y completa las dimensiones pendientes antes de usar el resultado.</p>
-        {!hasTranscript && <p>No hay una transcripción guardada. Puedes calificar la sesión manualmente.</p>}
-        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción…</p>}
+        {!hasAnalysisData && <p>No hay una transcripción ni métricas de video guardadas. Puedes calificar la sesión manualmente.</p>}
+        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción y el análisis de video…</p>}
         {suggestionError && <p role="alert" className="text-rose-400">{suggestionError}</p>}
-        {hasTranscript && !suggesting && !suggestionsLoaded && !savedPayload && (
+        {hasAnalysisData && !suggesting && !suggestionsLoaded && !savedPayload && (
           <button type="button" className="text-emerald-300 underline" onClick={() => void requestSuggestions()}>
             {suggestionError ? "Reintentar sugerencias" : "Generar sugerencias"}
           </button>
@@ -597,24 +613,21 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         ))}
       </div>
 
-      {/* Vista expandible opcional con componentes previos */}
-      {showAdvancedViews && (
-        <div className="space-y-4 pt-2">
-          {legacyIndicators.length > 0 && (
-            <>
-              <PerformanceMetricsChart
-                metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
-                  { indicator: label, score: adjustedScore, feedback }
-                ))}
-              />
-              <HybridRubricEditor
-                indicators={legacyIndicators}
-                onScoreChange={handleScoreChange}
-              />
-            </>
-          )}
-        </div>
-      )}
+      <div className="space-y-4 pt-2">
+        {legacyIndicators.length > 0 && (
+          <>
+            <PerformanceMetricsChart
+              metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
+                { indicator: label, score: adjustedScore, feedback }
+              ))}
+            />
+            <HybridRubricEditor
+              indicators={legacyIndicators}
+              onScoreChange={handleScoreChange}
+            />
+          </>
+        )}
+      </div>
 
       {/* Dictamen, observaciones y guardado */}
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
@@ -685,14 +698,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               {isSaving ? "Guardando evaluación..." : "Guardar Evaluación Consolidada"}
             </button>
 
-            <button
-              type="button"
-              onClick={handleDownloadRubric}
-              disabled={suggesting}
-              className="px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-slate-950 hover:bg-slate-800 text-emerald-300 font-medium text-sm transition-colors cursor-pointer"
-            >
-              Descargar Rúbrica
-            </button>
           </div>
 
           {statusMessage && (
