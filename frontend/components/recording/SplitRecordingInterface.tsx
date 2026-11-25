@@ -19,6 +19,20 @@ function recorderOptions(): MediaRecorderOptions | undefined {
   return mimeType ? { mimeType } : undefined;
 }
 
+function audioRecorderOptions(): MediaRecorderOptions | undefined {
+  if (typeof MediaRecorder === 'undefined') return undefined;
+  const types = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+  ];
+  const mimeType = types.find((type) => MediaRecorder.isTypeSupported(type));
+  return mimeType
+    ? { mimeType, audioBitsPerSecond: 64000 }
+    : { audioBitsPerSecond: 64000 };
+}
+
 const CameraComponent = dynamic(() => import('../../app/CameraComponent'), {
   ssr: false,
   loading: () => (
@@ -44,11 +58,17 @@ export function SplitRecordingInterface({
   const live = useLiveTranscript(stream, session, audioContext);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  const audioRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const startedAtRef = useRef<number>(0);
 
   useEffect(() => {
     if (!stream || typeof MediaRecorder === 'undefined') return;
 
     chunksRef.current = [];
+    audioChunksRef.current = [];
+    startedAtRef.current = performance.now();
+
     let recorder: MediaRecorder;
     try {
       recorder = new MediaRecorder(stream, recorderOptions());
@@ -63,19 +83,44 @@ export function SplitRecordingInterface({
     recorder.start(1000);
     recorderRef.current = recorder;
 
+    // Parallel lightweight audio-only recorder (~480 KB/min Opus) for fast,
+    // full-file transcription without video overhead or ffmpeg dependency.
+    let audioRecorder: MediaRecorder | null = null;
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length > 0) {
+      try {
+        audioRecorder = new MediaRecorder(new MediaStream(audioTracks), audioRecorderOptions());
+        audioRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) audioChunksRef.current.push(event.data);
+        };
+        audioRecorder.start(1000);
+        audioRecorderRef.current = audioRecorder;
+      } catch (error) {
+        console.warn('Audio-only MediaRecorder no disponible, se usará el video:', error);
+      }
+    }
+
     return () => {
       recorderRef.current = null;
       recorder.ondataavailable = null;
       if (recorder.state !== 'inactive') recorder.stop();
+      audioRecorderRef.current = null;
+      if (audioRecorder) {
+        audioRecorder.ondataavailable = null;
+        if (audioRecorder.state !== 'inactive') audioRecorder.stop();
+      }
     };
   }, [stream]);
 
-  const collectRecording = () =>
+  const stopRecorder = (
+    recorder: MediaRecorder | null,
+    chunks: Blob[],
+    fallbackType: string,
+  ) =>
     new Promise<Blob | null>((resolve) => {
-      const recorder = recorderRef.current;
       const toBlob = () => {
-        const type = recorder?.mimeType || 'video/webm';
-        const blob = new Blob(chunksRef.current, { type });
+        const type = recorder?.mimeType || fallbackType;
+        const blob = new Blob(chunks, { type });
         resolve(blob.size > 0 ? blob : null);
       };
       if (!recorder || recorder.state === 'inactive') {
@@ -90,21 +135,29 @@ export function SplitRecordingInterface({
     if (stopping) return;
     setStopping(true);
     setIsRecording(false);
-    const blob = await collectRecording();
-    const saved = await live.finish();
-    let videoUrl: string | null = blob ? URL.createObjectURL(blob) : null;
-    let videoKey: string | null = null;
-    if (blob) {
-      try {
-        const uploaded = await uploadRecording(blob, session.sessionId);
-        videoKey = uploaded.key;
-        if (!videoUrl) videoUrl = uploaded.playbackUrl;
-      } catch (error) {
-        console.error('No se pudo subir el video:', error);
-      }
-    }
+    const durationSeconds = startedAtRef.current
+      ? Math.max(0, (performance.now() - startedAtRef.current) / 1000)
+      : 0;
+    const [blob, audioBlob] = await Promise.all([
+      stopRecorder(recorderRef.current, chunksRef.current, 'video/webm'),
+      stopRecorder(audioRecorderRef.current, audioChunksRef.current, 'audio/webm'),
+    ]);
+
+    const uploadPromise: Promise<Awaited<ReturnType<typeof uploadRecording>> | undefined> = blob
+      ? uploadRecording(blob, session, { audioBlob, durationSeconds }).catch((error) => {
+          console.error('No se pudo subir el video:', error);
+          return undefined;
+        })
+      : Promise.resolve(undefined);
+
+    const [saved, video] = await Promise.all([live.finish(), uploadPromise]);
     stream?.getTracks().forEach((track) => track.stop());
-    onStopRecording?.({ ...saved, videoUrl, videoKey });
+    onStopRecording?.({
+      ...saved,
+      videoUrl: video?.playbackUrl,
+      videoKey: video?.key,
+      videoStorage: video?.source,
+    });
   };
 
   return (
@@ -124,6 +177,7 @@ export function SplitRecordingInterface({
 
       <CameraComponent
         stream={stream}
+        sessionId={session.sessionId}
         embedded
         caption={live.caption}
         previousCaption={live.previousCaption}

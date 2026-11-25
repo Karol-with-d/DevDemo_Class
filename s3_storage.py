@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -16,11 +17,24 @@ REQUIRED_ENV = (
     "AWS_BUCKET_NAME",
 )
 PRESIGN_EXPIRES = 3600
-_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def has_aws_settings():
+def is_s3_configured():
     return all(os.getenv(name) for name in REQUIRED_ENV)
+
+
+def _env_flag(name):
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_local_video_fallback():
+    """Opt-in local video storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_VIDEO_FALLBACK")
+
+
+def allow_local_evaluation_fallback():
+    """Opt-in local evaluation storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_EVALUATION_FALLBACK")
 
 
 def _require_settings():
@@ -33,17 +47,6 @@ def _require_settings():
         "region": os.environ["AWS_REGION"],
         "bucket": os.environ["AWS_BUCKET_NAME"],
     }
-
-
-def _local_path_for_key(key):
-    key = str(key)
-    if not key.startswith("recordings/") or ".." in key.split("/"):
-        raise RuntimeError("Clave de video no válida.")
-    path = os.path.normpath(os.path.join(_REPO_ROOT, key))
-    root = os.path.normpath(os.path.join(_REPO_ROOT, "recordings"))
-    if not path.startswith(root + os.sep):
-        raise RuntimeError("Clave de video no válida.")
-    return path
 
 
 def _client(region):
@@ -61,25 +64,12 @@ def media_type_for(filename="", content_type=""):
 
 
 def upload_video_bytes(data, session_id, content_type="video/webm", filename="recording.webm"):
+    settings = _require_settings()
     session = safe_session_id(session_id)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     media_type = media_type_for(filename, content_type)
     ext = "mp4" if media_type == "video/mp4" else "webm"
     key = f"recordings/{session}/{stamp}.{ext}"
-
-    if not has_aws_settings():
-        local_path = _local_path_for_key(key)
-        os.makedirs(os.path.dirname(local_path), exist_ok=True)
-        with open(local_path, "wb") as handle:
-            handle.write(data)
-        return {
-            "video_url": f"/video?key={key}",
-            "key": key,
-            "content_type": media_type,
-            "stored": "local",
-        }
-
-    settings = _require_settings()
     client = _client(settings["region"])
     try:
         client.put_object(
@@ -106,15 +96,6 @@ def upload_video_bytes(data, session_id, content_type="video/webm", filename="re
 
 
 def read_video_object(key):
-    # Videos grabados sin credenciales AWS quedan en disco con el mismo key.
-    # Servir el archivo local cuando exista aunque S3 ya esté configurado.
-    if not has_aws_settings() or os.path.isfile(_local_path_for_key(key)):
-        local_path = _local_path_for_key(key)
-        if not os.path.isfile(local_path):
-            raise RuntimeError("El video no existe en el almacenamiento local.")
-        with open(local_path, "rb") as handle:
-            return handle.read(), media_type_for(key)
-
     if not str(key).startswith("recordings/"):
         raise RuntimeError("Clave de video no válida.")
     settings = _require_settings()
@@ -129,12 +110,6 @@ def read_video_object(key):
 
 
 def delete_video_object(key):
-    local_path = _local_path_for_key(key)
-    if os.path.isfile(local_path):
-        os.remove(local_path)
-    if not has_aws_settings():
-        return
-
     if not str(key).startswith("recordings/"):
         raise RuntimeError("Clave de video no válida.")
     settings = _require_settings()
@@ -143,3 +118,45 @@ def delete_video_object(key):
         client.delete_object(Bucket=settings["bucket"], Key=key)
     except (BotoCoreError, ClientError) as exc:
         raise RuntimeError(f"Error de S3: {exc}") from exc
+
+
+def upload_evaluation_json(session_id, evaluation_data):
+    """Guarda la rúbrica y el reporte cuantitativo en recordings/{session}/evaluation.json."""
+    settings = _require_settings()
+    session = safe_session_id(session_id)
+    key = f"recordings/{session}/evaluation.json"
+    client = _client(settings["region"])
+    body = json.dumps(evaluation_data, ensure_ascii=False, indent=2).encode("utf-8")
+    try:
+        client.put_object(
+            Bucket=settings["bucket"],
+            Key=key,
+            Body=body,
+            ContentType="application/json; charset=utf-8",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Error de S3 al guardar evaluación: {exc}") from exc
+
+    return {"key": key, "savedInS3": True}
+
+
+def read_evaluation_json(session_id):
+    """Lee la evaluación desde S3. Devuelve None si esa sesión aún no tiene una."""
+    settings = _require_settings()
+    session = safe_session_id(session_id)
+    key = f"recordings/{session}/evaluation.json"
+    client = _client(settings["region"])
+    try:
+        obj = client.get_object(Bucket=settings["bucket"], Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        # Missing objects often come back as AccessDenied if the IAM user
+        # cannot ListBucket. That is not a failed rubric load.
+        if code in ("NoSuchKey", "404", "AccessDenied", "403"):
+            return None
+        raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
+    except BotoCoreError as exc:
+        raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
+
+    raw = obj["Body"].read().decode("utf-8")
+    return json.loads(raw)

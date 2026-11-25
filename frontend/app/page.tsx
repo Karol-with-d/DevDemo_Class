@@ -5,15 +5,17 @@ import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
 import { TechnicalTranscript } from "../components/recording/TechnicalTranscript";
-import { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
+import type { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
+import { ConsolidatedReportView } from "../components/reports/ConsolidatedReportView";
 import { EvaluationsOverview } from "../components/review/EvaluationsOverview";
 import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
-import { SavedRecording, deleteRecording, playbackUrlForKey } from "../lib/api";
+import { SavedRecording } from "../lib/api";
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "review">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "history" | "evaluation">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [videoSaveMessage, setVideoSaveMessage] = useState("");
   const [reviewRecordings, setReviewRecordings] = useState<SavedRecording[] | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
@@ -21,6 +23,15 @@ export default function Page() {
   const streamRef = useRef<MediaStream | null>(null);
   const pageAlive = useRef(false);
   streamRef.current = stream;
+
+  useEffect(() => {
+    if (window.isSecureContext) return;
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return;
+    const port = window.location.port ? `:${window.location.port}` : "";
+    const target = `http://127.0.0.1${port}${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.replace(target);
+  }, []);
 
   useEffect(() => {
     pageAlive.current = true;
@@ -53,8 +64,15 @@ export default function Page() {
     setStep("recording");
   };
 
-  const handleStopRecording = (transcript: TranscriptSaveResult) => {
-    setSavedTranscript(transcript);
+  const handleStopRecording = (result: TranscriptSaveResult) => {
+    setSavedTranscript(result);
+    if (result.videoStorage === "local") {
+      setVideoSaveMessage("El video se guardó en este equipo.");
+    } else if (result.videoUrl) {
+      setVideoSaveMessage("El video se guardó correctamente.");
+    } else {
+      setVideoSaveMessage("No se pudo guardar el video.");
+    }
     setStep("finished");
   };
 
@@ -69,8 +87,8 @@ export default function Page() {
     setAudioContext(null);
     setStream(null);
     setSessionData(null);
-    setSavedTranscript(null);
     setReviewRecordings(null);
+    setSavedTranscript(null);
     setStep("setup");
   };
 
@@ -98,11 +116,26 @@ export default function Page() {
         {step === "evaluations" && (
           <EvaluationsOverview
             onBack={() => setStep("setup")}
-            onSelectCandidate={(recs) => {
-              setReviewRecordings(recs);
-              setStep("review");
+            onSelectCandidate={(recordings) => {
+              setReviewRecordings(recordings);
+              setStep("history");
             }}
           />
+        )}
+
+        {step === "history" && (
+          <div className="w-full">
+            <SessionReview
+              session={sessionData}
+              transcript={null}
+              recordings={reviewRecordings ?? undefined}
+              onBack={() => {
+                setReviewRecordings(null);
+                setStep("evaluations");
+              }}
+              onNewSession={handleNewSession}
+            />
+          </div>
         )}
 
         {step === "calibration" && (
@@ -127,105 +160,56 @@ export default function Page() {
             </div>
             <h2 className="mb-2 text-2xl font-bold">Grabación finalizada</h2>
             <p className="mb-6 text-sm text-[#82918f]">
-              Los subtítulos de {sessionData?.candidateName} quedaron guardados con el momento en que habló.
+              {videoSaveMessage || (
+                <>
+                  La sesión del candidato{" "}
+                  <span className="font-semibold text-[#e9f0ed]">{sessionData?.candidateName || "registrado"}</span> se ha guardado correctamente.
+                </>
+              )}
             </p>
-            {savedTranscript?.videoUrl ? (
-              <video
-                className="mb-6 aspect-video w-full rounded-2xl bg-black"
-                src={savedTranscript.videoUrl}
-                controls
-                playsInline
-                preload="auto"
-              />
-            ) : (
-              <p className="mb-6 text-sm text-[#82918f]">
-                El video no se pudo subir. Los subtítulos sí quedaron guardados.
-              </p>
-            )}
             <TechnicalTranscript
               segments={savedTranscript?.segments ?? []}
               vocabulary={savedTranscript?.vocabulary ?? []}
             />
-            {savedTranscript?.vttPath && (
-              <p className="mb-6 w-full break-all text-left text-xs text-[#82918f]">
-                Subtítulos del video: {savedTranscript.vttPath}
-              </p>
-            )}
-            {savedTranscript?.videoKey ? (
-              <p className="mb-4 w-full text-left text-sm text-[#9ce4c1]">
-                Guardado en el sistema. Puedes descargarlo o abrirlo después en Grabaciones.
-              </p>
-            ) : null}
-            <div className="mb-3 flex w-full flex-col gap-2 sm:flex-row">
-              {savedTranscript?.videoKey && (
-                <a
-                  className="flex-1 rounded-xl border border-white/15 py-3.5 text-center text-sm font-bold text-[#e9f0ed] hover:border-white/30"
-                  href={playbackUrlForKey(savedTranscript.videoKey, true)}
-                >
-                  Guardar en dispositivo
-                </a>
-              )}
-              {savedTranscript?.videoKey && sessionData && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    if (!window.confirm("¿Eliminar esta grabación del sistema y de S3?")) return;
-                    try {
-                      await deleteRecording(sessionData.sessionId);
-                      handleNewSession();
-                    } catch (error) {
-                      window.alert(error instanceof Error ? error.message : "No se pudo eliminar.");
-                    }
-                  }}
-                  className="flex-1 rounded-xl border border-red-400/40 py-3.5 text-sm font-bold text-red-300 hover:bg-red-950/40"
-                >
-                  Eliminar
-                </button>
-              )}
+            <div className="flex w-full flex-col gap-3">
+              <button
+                type="button"
+                onClick={() => setStep("evaluation")}
+                className="w-full cursor-pointer rounded-xl bg-[#9ce4c1] py-3.5 text-sm font-bold text-[#0b1014] shadow-lg transition-all hover:bg-[#b1f0d2]"
+              >
+                Continuar a Rúbrica y Reporte
+              </button>
+              <button
+                type="button"
+                onClick={handleNewSession}
+                className="w-full cursor-pointer rounded-xl border border-white/10 bg-transparent py-3 text-sm font-medium text-[#82918f] transition-all hover:bg-white/5 hover:text-white"
+              >
+                Iniciar nueva sesión
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setStep("evaluations")}
-              className="mb-3 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed]"
-            >
-              Ver evaluaciones anteriores
-            </button>
-            {/* US11: acceso a la auditoría con pestañas (Reporte/Rúbrica/Galería) */}
-            <button
-              type="button"
-              onClick={() => setStep("review")}
-              className="mb-3 w-full rounded-xl border border-[#9ce4c1]/40 py-3.5 text-sm font-semibold text-[#9ce4c1] hover:bg-[#9ce4c1]/10"
-            >
-              Auditar evaluación
-            </button>
-            <button
-              onClick={handleNewSession}
-              className="w-full cursor-pointer rounded-xl bg-[#9ce4c1] py-3.5 text-sm font-bold text-[#0b1014] shadow-lg transition-all hover:bg-[#b1f0d2]"
-            >
-              Iniciar nueva sesión
-            </button>
           </div>
         )}
 
-        {/* Auditoría (US11): Reporte / Rúbrica / Grabaciones con datos reales.
-            Se accede desde "Grabación finalizada" con "Auditar evaluación"
-            (sesión actual) o desde las tarjetas de "Evaluaciones anteriores"
-            (modo historial, con reviewRecordings). */}
-        {step === "review" && (
-          <div className="w-full">
-            <SessionReview
-              session={sessionData}
-              transcript={savedTranscript}
-              recordings={reviewRecordings ?? undefined}
-              onBack={
-                reviewRecordings
-                  ? () => {
-                      setReviewRecordings(null);
-                      setStep("evaluations");
-                    }
-                  : undefined
-              }
-              onNewSession={handleNewSession}
+        {step === "evaluation" && sessionData && (
+          <div className="w-full max-w-5xl pt-6">
+            <div className="mb-4 flex justify-end">
+              <button
+                type="button"
+                onClick={handleNewSession}
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-full border border-white/15 bg-[#11191e]/90 px-4 py-1.5 text-xs font-medium text-[#e9f0ed] shadow-lg backdrop-blur-md transition-all hover:bg-white/10"
+              >
+                Volver al inicio
+              </button>
+            </div>
+            <ConsolidatedReportView
+              sessionId={sessionData.sessionId}
+              candidateName={sessionData.candidateName}
+              evaluatorName={sessionData.evaluatorName}
+              technology={sessionData.technology}
+              complexity={sessionData.complexity}
+              autoSuggest
+              initialSegments={savedTranscript?.segments ?? []}
+              initialVocabulary={savedTranscript?.vocabulary ?? []}
             />
           </div>
         )}

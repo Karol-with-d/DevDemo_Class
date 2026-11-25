@@ -15,6 +15,7 @@ interface Metrics {
 
 interface CameraComponentProps {
   stream?: MediaStream | null;
+  sessionId?: string;
   embedded?: boolean;
   caption?: string;
   previousCaption?: string;
@@ -23,12 +24,14 @@ interface CameraComponentProps {
 
 export default function CameraComponent({
   stream: providedStream,
+  sessionId,
   embedded = false,
   caption = "",
   previousCaption = "",
   captionStatus,
 }: CameraComponentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const [metrics, setMetrics] = useState<Metrics>({
     movilidad: "Conectando al backend...",
     gesticulacion: "Conectando al backend...",
@@ -50,6 +53,10 @@ export default function CameraComponent({
     let isSubmitting = false;
     let isMounted = true;
     let reconnectTimeout: NodeJS.Timeout | null = null;
+    let poseSentAt = 0;
+    let poseWaiting = false;
+    let poseFrames = 0;
+    let poseSlow = 0;
 
     const releaseSocket = (socket: WebSocket) => {
       socket.onopen = null;
@@ -65,8 +72,12 @@ export default function CameraComponent({
       if (!isMounted) return;
 
       try {
-        const socket = new WebSocket("ws://127.0.0.1:8000/ws/pose-analysis");
+        const wsUrl = sessionId
+          ? `ws://127.0.0.1:8000/ws/pose-analysis?sessionId=${encodeURIComponent(sessionId)}`
+          : "ws://127.0.0.1:8000/ws/pose-analysis";
+        const socket = new WebSocket(wsUrl);
         ws = socket;
+        wsRef.current = socket;
 
         socket.onopen = () => {
           if (!isMounted || ws !== socket) return;
@@ -76,6 +87,18 @@ export default function CameraComponent({
 
         socket.onmessage = (event) => {
           if (!isMounted || ws !== socket) return;
+          poseWaiting = false;
+          if (poseSentAt) {
+            poseFrames += 1;
+            const frameMs = Math.round(performance.now() - poseSentAt);
+            poseSentAt = 0;
+            if (frameMs >= 200) poseSlow += 1;
+            if (frameMs >= 200 || poseFrames % 20 === 0) {
+              console.info(
+                `[TIME pose] frame=${frameMs}ms slow=${poseSlow}/${poseFrames}`,
+              );
+            }
+          }
           try {
             const data: Metrics = JSON.parse(event.data);
             setMetrics(data);
@@ -86,6 +109,8 @@ export default function CameraComponent({
 
         socket.onclose = () => {
           if (!isMounted || ws !== socket) return;
+          poseWaiting = false;
+          poseSentAt = 0;
           console.log("🔴 WebSocket desconectado");
           setBackendConnected(false);
           setMetrics((prev) => ({
@@ -132,17 +157,21 @@ export default function CameraComponent({
           video.videoWidth > 0 &&
           ws &&
           ws.readyState === WebSocket.OPEN &&
-          !isSubmitting
+          !isSubmitting &&
+          !poseWaiting
         ) {
           isSubmitting = true;
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
-          ctx?.drawImage(video, 0, 0);
+          const scale = Math.min(1, 960 / video.videoWidth);
+          canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+          canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+          ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
 
           canvas.toBlob(
             (blob) => {
               try {
                 if (blob && ws && ws.readyState === WebSocket.OPEN) {
+                  poseWaiting = true;
+                  poseSentAt = performance.now();
                   ws.send(blob);
                 }
               } finally {
@@ -150,7 +179,7 @@ export default function CameraComponent({
               }
             },
             "image/jpeg",
-            0.85
+            0.7
           );
         }
       }, 100);
@@ -190,13 +219,22 @@ export default function CameraComponent({
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) {
         releaseSocket(ws);
+        if (wsRef.current === ws) wsRef.current = null;
         ws = null;
       }
       if (ownsStream && stream) {
         stream.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [providedStream]);
+  }, [providedStream, sessionId]);
+
+  useEffect(() => {
+    if (captionStatus !== "saving") return;
+    const socket = wsRef.current;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "flush" }));
+    }
+  }, [captionStatus]);
 
   return (
     <div className={`analysis-shell flex flex-col md:flex-row gap-4 text-white ${embedded ? "min-h-0 bg-transparent p-0" : "min-h-screen bg-gray-950 p-3 sm:p-6"}`}>
