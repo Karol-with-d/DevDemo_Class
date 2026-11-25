@@ -1,3 +1,4 @@
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
@@ -23,7 +24,9 @@ SAMPLE_RATE = 16000
 CHUNK_SECONDS = 10
 MAX_TRANSCRIPTION_BYTES = 24 * 1024 * 1024
 LONG_AUDIO_CHUNK_SECONDS = 600
+AUDIO_LLM_CHUNK_SECONDS = 300
 LONG_AUDIO_OVERLAP_SECONDS = 5
+DEFAULT_FINAL_TRANSCRIBE_MODEL = "gpt-audio-1.5"
 audio_q = queue.Queue()
 full_text = []
 _client = None
@@ -43,9 +46,14 @@ def _session_lock(session_id):
 
 RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recordings")
 
-VERBATIM_FILLER_CUE = "Eh, pues, o sea, este... bueno, la verdad es que, mmm, sí, ¿verdad?"
+VERBATIM_FILLER_CUE = "Eh, pues, o sea, este... ahm, bueno, la verdad es que, mmm, ajá, como que, vale, ¿verdad?"
 FILLER_KEYWORDS = [
     "eh",
+    "ahm",
+    "emm",
+    "mmm",
+    "ah",
+    "ajá",
     "este",
     "o sea",
     "pues",
@@ -53,46 +61,18 @@ FILLER_KEYWORDS = [
     "bueno",
     "digamos",
     "básicamente",
-    "mmm",
-]
-
-MULETILLA_PATTERNS = [
-    (r"\bo sea\b", "o sea"),
-    (r"\bla verdad\b", "la verdad"),
-    (r"\bes que\b", "es que"),
-    (r"\beh+\b", "eh"),
-    (r"\beste+\b", "este"),
-    (r"\bpues\b", "pues"),
-    (r"\bbueno\b", "bueno"),
-    (r"\bverdad\b", "verdad"),
-    (r"\bdigamos\b", "digamos"),
-    (r"\bbásicamente\b", "básicamente"),
-    (r"\bmmm+\b", "mmm"),
+    "como que",
+    "entonces",
+    "vale",
+    "ok",
 ]
 
 
 def extract_muletillas_from_text(text):
-    """Extract and count Spanish filler words (muletillas) from verbatim text."""
-    cleaned = str(text or "").lower()
-    counts = Counter()
-    for pattern, label in MULETILLA_PATTERNS:
-        matches = re.findall(pattern, cleaned)
-        if matches:
-            counts[label] += len(matches)
+    """Extract and count Spanish filler words (muletillas) via vocab_extractor."""
+    from vocab_extractor import extract_muletillas
 
-    total_words = len(re.findall(r"\b\w+\b", cleaned))
-    total_muletillas = sum(counts.values())
-    ratio_pct = round((total_muletillas / total_words) * 100, 2) if total_words else 0.0
-    breakdown = dict(counts.most_common())
-    items = [{"phrase": phrase, "count": count} for phrase, count in counts.most_common()]
-
-    return {
-        "total": total_muletillas,
-        "totalWords": total_words,
-        "ratioPct": ratio_pct,
-        "breakdown": breakdown,
-        "items": items,
-    }
+    return extract_muletillas(text)
 
 
 def get_client():
@@ -781,15 +761,15 @@ def _extract_audio_with_ffmpeg(input_path, workdir):
     return None
 
 
-def _split_audio_with_ffmpeg(input_path, workdir, duration_seconds):
+def _split_audio_with_ffmpeg(input_path, workdir, duration_seconds, chunk_seconds=LONG_AUDIO_CHUNK_SECONDS):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return []
     total = duration_seconds if duration_seconds > 0 else _probe_duration_seconds(input_path)
     if total <= 0:
         return []
-    step = max(60.0, float(LONG_AUDIO_CHUNK_SECONDS - LONG_AUDIO_OVERLAP_SECONDS))
-    window = float(LONG_AUDIO_CHUNK_SECONDS)
+    step = max(60.0, float(chunk_seconds - LONG_AUDIO_OVERLAP_SECONDS))
+    window = float(chunk_seconds)
     chunks = []
     start = 0.0
     index = 0
@@ -828,6 +808,133 @@ def _split_audio_with_ffmpeg(input_path, workdir, duration_seconds):
     return chunks
 
 
+def _convert_to_mp3_with_ffmpeg(input_path, workdir, out_name="audio_llm.mp3"):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    out_path = Path(workdir) / out_name
+    proc = subprocess.run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "24000",
+            "-b:a",
+            "64k",
+            str(out_path),
+        ],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0:
+        return out_path
+    return None
+
+
+def _is_audio_chat_model(model: str) -> bool:
+    lowered = (model or "").strip().lower()
+    return "audio" in lowered and "transcribe" not in lowered
+
+
+def _extract_audio_llm_text(raw: str) -> str:
+    """Safely unwrap JSON mode or accidental JSON-like wrappers from gpt-audio-1.5."""
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return ""
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.IGNORECASE).strip()
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            for key in ("text", "transcript", "transcription", "transcripcion"):
+                val = parsed.get(key)
+                if isinstance(val, str):
+                    return " ".join(val.split())
+        if isinstance(parsed, str):
+            return " ".join(parsed.split())
+    except json.JSONDecodeError:
+        pass
+    # Strip occasional malformed single-string brace wrapper like '{"Hola...}'
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        inner = cleaned[1:-1].strip()
+        if inner.startswith('"') and inner.endswith('"'):
+            inner = inner[1:-1].strip()
+        elif inner.startswith('"'):
+            inner = inner[1:].strip()
+        return " ".join(inner.split())
+    return " ".join(cleaned.split())
+
+
+_AUDIO_LLM_SYSTEM_PROMPT = (
+    "Eres un transcriptor fonético y literal en español de evaluaciones docentes. "
+    "Transcribe palabra por palabra exactamente lo que dice la persona en el audio. "
+    "REGLA CRÍTICA: Conserva TODAS las muletillas, dudas, vacilaciones vocales, repeticiones "
+    "y falsos inicios exactamente como suenan (por ejemplo: eh, ehh, ahm, amm, emm, mmm, ah, "
+    "ajá, este, o sea, pues, bueno, como que, digamos, básicamente, vale, ok, entonces, ¿verdad?). "
+    "NO limpies el habla, NO resumas, NO corrijas la gramática ni inventes palabras que no se oigan. "
+    "Usa puntuación normal de oraciones en español (puntos, signos de pregunta o exclamación y "
+    "mayúscula al iniciar cada oración) manteniendo intactas todas las muletillas. "
+    'Responde exclusivamente con un objeto JSON válido con el formato {"text": "..."}.'
+)
+
+
+def _call_audio_llm_transcription(audio_bytes, audio_format, model, technology=""):
+    """Call multimodal gpt-audio-1.5 via Chat Completions input_audio in JSON mode."""
+    client = get_client().with_options(timeout=180, max_retries=1)
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    topic_hint = f" Tema de la clase: {technology}." if technology else ""
+    user_instruction = (
+        "Transcribe literalmente este audio en español manteniendo todas las muletillas "
+        "y sonidos de vacilación exactamente como se escuchan, usando puntuación de oraciones "
+        'y devolviendo únicamente JSON {"text": "..."}.' + topic_hint
+    )
+
+    kwargs = {
+        "model": model,
+        "modalities": ["text"],
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": _AUDIO_LLM_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_instruction},
+                    {"type": "input_audio", "input_audio": {"data": b64, "format": audio_format}},
+                ],
+            },
+        ],
+    }
+
+    try:
+        response = client.chat.completions.create(
+            response_format={"type": "json_object"},
+            **kwargs,
+        )
+    except Exception as exc:
+        detail = str(exc).lower()
+        if "response_format" in detail or "json_object" in detail:
+            response = client.chat.completions.create(**kwargs)
+        else:
+            raise
+
+    raw_content = (response.choices[0].message.content or "") if response.choices else ""
+    text = _extract_audio_llm_text(raw_content)
+
+    class _AudioLLMResult:
+        def __init__(self, value):
+            self.text = value
+            self.segments = None
+            self.duration = None
+
+    return _AudioLLMResult(text)
+
+
 def _build_recording_prompt(technology=""):
     parts = [
         f"Transcripción literal en español de una evaluación técnica. {VERBATIM_FILLER_CUE}"
@@ -837,10 +944,12 @@ def _build_recording_prompt(technology=""):
     return " ".join(parts)[:500]
 
 
-def _call_full_transcription(audio_bytes, filename, prompt):
+def _call_full_transcription(audio_bytes, filename, prompt, model_override=None):
     """Call OpenAI file transcription, using verbose_json only on models that support it."""
     global _verbose_json_supported
-    model = os.getenv("OPENAI_TRANSCRIBE_MODEL") or "gpt-transcribe"
+    model = model_override or os.getenv("OPENAI_TRANSCRIBE_MODEL") or "gpt-transcribe"
+    if _is_audio_chat_model(model):
+        model = "gpt-transcribe"
     client = get_client().with_options(timeout=180, max_retries=1)
     common = {
         "model": model,
@@ -987,98 +1096,169 @@ def transcribe_recording_file(
     duration_seconds=0.0,
     live_segments=None,
 ):
-    """Run a high-accuracy full-recording transcription pass over complete uncut audio."""
+    """Run a high-accuracy verbatim full-recording transcription pass over complete uncut audio.
+
+    Defaults to gpt-audio-1.5 (preserves Spanish vocal hesitations like eh/ahm/mmm/este)
+    with automatic fallback to gpt-transcribe when ffmpeg is unavailable or the audio
+    chat model fails.
+    """
     started = time.perf_counter()
+    configured_model = (os.getenv("OPENAI_TRANSCRIBE_MODEL") or DEFAULT_FINAL_TRANSCRIBE_MODEL).strip()
+    prefer_audio_llm = _is_audio_chat_model(configured_model)
     prompt = _build_recording_prompt(technology)
     live_segments = live_segments or []
     live_first_start = float(live_segments[0]["start"]) if live_segments else 0.0
     live_last_end = max((float(seg.get("end") or seg.get("start") or 0.0) for seg in live_segments), default=0.0)
 
+    def _merge_chunk_results(chunk_results):
+        merged = []
+        prev_chunk_text = ""
+        for chunk_start, chunk_end, chunk_result in chunk_results:
+            chunk_segs = _extract_result_segments(chunk_result, chunk_start, chunk_start, chunk_end)
+            while prev_chunk_text and chunk_segs:
+                trimmed_first = _trim_overlapping_prefix(prev_chunk_text, chunk_segs[0]["text"])
+                if trimmed_first == chunk_segs[0]["text"]:
+                    break
+                if trimmed_first:
+                    chunk_segs[0]["text"] = trimmed_first
+                    break
+                chunk_segs.pop(0)
+            if chunk_segs:
+                prev_chunk_text = " ".join(seg["text"] for seg in chunk_segs)
+                merged.extend(chunk_segs)
+        return merged
+
+    used_model = configured_model
     with tempfile.TemporaryDirectory(prefix="transcribe_") as workdir:
         source_path = None
-        prepared_bytes = None
-        prepared_filename = None
+        raw_audio_ext = None
 
         if audio_bytes:
-            ext = _extension_for_media(audio_filename, audio_content_type)
-            prepared_filename = f"recording{ext}"
-            if len(audio_bytes) <= MAX_TRANSCRIPTION_BYTES:
-                prepared_bytes = audio_bytes
-            else:
-                source_path = Path(workdir) / prepared_filename
-                source_path.write_bytes(audio_bytes)
-        else:
-            if video_path is not None and Path(video_path).is_file():
-                source_path = Path(video_path)
-            elif video_bytes:
-                ext = _extension_for_media(video_filename, video_content_type)
-                source_path = Path(workdir) / f"video{ext}"
-                source_path.write_bytes(video_bytes)
+            raw_audio_ext = _extension_for_media(audio_filename, audio_content_type)
+            source_path = Path(workdir) / f"recording{raw_audio_ext}"
+            source_path.write_bytes(audio_bytes)
+        elif video_path is not None and Path(video_path).is_file():
+            source_path = Path(video_path)
+        elif video_bytes:
+            ext = _extension_for_media(video_filename, video_content_type)
+            source_path = Path(workdir) / f"video{ext}"
+            source_path.write_bytes(video_bytes)
 
-            if source_path is None:
-                return []
-
-            extracted = _extract_audio_with_ffmpeg(source_path, workdir)
-            if extracted is not None:
-                source_path = extracted
-
-            if source_path.stat().st_size <= MAX_TRANSCRIPTION_BYTES:
-                prepared_bytes = source_path.read_bytes()
-                prepared_filename = source_path.name
+        if source_path is None:
+            return []
 
         total_duration = float(duration_seconds or 0.0)
-        if total_duration <= 0 and source_path is not None:
+        if total_duration <= 0:
             total_duration = _probe_duration_seconds(source_path)
         if total_duration <= 0 and live_last_end > 0:
             total_duration = live_last_end
 
-        if prepared_bytes is not None:
-            result = _call_full_transcription(prepared_bytes, prepared_filename or "audio.webm", prompt)
-            raw_text = _without_prompt_echo(getattr(result, "text", "") or "")
-            if total_duration <= 0:
-                word_count = len(raw_text.split())
-                total_duration = max(1.0, word_count / 2.5)
-            start_anchor = 0.0
-            if live_first_start > 0.5 and live_first_start < total_duration * 0.5:
-                start_anchor = max(0.0, live_first_start - 0.3)
-            segments = _extract_result_segments(result, 0.0, start_anchor, total_duration)
-        else:
-            # Oversized audio (>24 MB): split with 5s overlap and transcribe chunks concurrently.
-            chunk_specs = _split_audio_with_ffmpeg(source_path, workdir, total_duration)
-            if not chunk_specs:
-                raise RuntimeError(
-                    "El archivo supera 24 MB y ffmpeg no está disponible para dividir el audio."
+        segments = None
+
+        # Primary path: multimodal gpt-audio-1.5 for strict verbatim + vocal muletillas
+        if prefer_audio_llm:
+            try:
+                can_chunk_audio_llm = total_duration > AUDIO_LLM_CHUNK_SECONDS and shutil.which("ffmpeg")
+                if can_chunk_audio_llm:
+                    chunk_specs = _split_audio_with_ffmpeg(
+                        source_path, workdir, total_duration, chunk_seconds=AUDIO_LLM_CHUNK_SECONDS
+                    )
+                    if chunk_specs:
+                        def _transcribe_llm_chunk(spec):
+                            chunk_path, chunk_start, chunk_end = spec
+                            chunk_res = _call_audio_llm_transcription(
+                                chunk_path.read_bytes(), "mp3", configured_model, technology=technology
+                            )
+                            return chunk_start, chunk_end, chunk_res
+
+                        with ThreadPoolExecutor(max_workers=min(3, len(chunk_specs))) as pool:
+                            chunk_results = list(pool.map(_transcribe_llm_chunk, chunk_specs))
+                        segments = _merge_chunk_results(chunk_results)
+                else:
+                    if raw_audio_ext in (".mp3", ".wav") and source_path.stat().st_size <= MAX_TRANSCRIPTION_BYTES:
+                        llm_path = source_path
+                        llm_fmt = raw_audio_ext.lstrip(".")
+                    else:
+                        llm_path = _convert_to_mp3_with_ffmpeg(source_path, workdir)
+                        llm_fmt = "mp3"
+
+                    if llm_path is not None and llm_path.stat().st_size <= MAX_TRANSCRIPTION_BYTES:
+                        result = _call_audio_llm_transcription(
+                            llm_path.read_bytes(), llm_fmt, configured_model, technology=technology
+                        )
+                        raw_text = _without_prompt_echo(getattr(result, "text", "") or "")
+                        eff_duration = total_duration if total_duration > 0 else max(1.0, len(raw_text.split()) / 2.5)
+                        start_anchor = 0.0
+                        if live_first_start > 0.5 and live_first_start < eff_duration * 0.5:
+                            start_anchor = max(0.0, live_first_start - 0.3)
+                        segments = _extract_result_segments(result, 0.0, start_anchor, eff_duration)
+                    else:
+                        print(
+                            "[WARN] ffmpeg no disponible o audio demasiado grande para gpt-audio-1.5; usando gpt-transcribe.",
+                            flush=True,
+                        )
+            except Exception as exc:
+                print(
+                    f"[WARN] {configured_model} falló ({exc}); usando respaldo gpt-transcribe.",
+                    flush=True,
                 )
 
-            def _transcribe_chunk(spec):
-                chunk_path, chunk_start, chunk_end = spec
-                chunk_result = _call_full_transcription(chunk_path.read_bytes(), chunk_path.name, prompt)
-                return chunk_start, chunk_end, chunk_result
+        # Fallback or explicit file-transcription path (gpt-transcribe / whisper-1)
+        if segments is None:
+            used_model = "gpt-transcribe" if prefer_audio_llm else configured_model
+            prepared_bytes = None
+            prepared_filename = None
+            fallback_source = source_path
 
-            max_workers = min(3, len(chunk_specs))
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                chunk_results = list(pool.map(_transcribe_chunk, chunk_specs))
+            if audio_bytes and len(audio_bytes) <= MAX_TRANSCRIPTION_BYTES:
+                prepared_bytes = audio_bytes
+                prepared_filename = source_path.name
+            else:
+                extracted = _extract_audio_with_ffmpeg(fallback_source, workdir)
+                if extracted is not None:
+                    fallback_source = extracted
+                if fallback_source.stat().st_size <= MAX_TRANSCRIPTION_BYTES:
+                    prepared_bytes = fallback_source.read_bytes()
+                    prepared_filename = fallback_source.name
 
-            segments = []
-            prev_chunk_text = ""
-            for chunk_start, chunk_end, chunk_result in chunk_results:
-                chunk_segs = _extract_result_segments(chunk_result, chunk_start, chunk_start, chunk_end)
-                while prev_chunk_text and chunk_segs:
-                    trimmed_first = _trim_overlapping_prefix(prev_chunk_text, chunk_segs[0]["text"])
-                    if trimmed_first == chunk_segs[0]["text"]:
-                        break
-                    if trimmed_first:
-                        chunk_segs[0]["text"] = trimmed_first
-                        break
-                    chunk_segs.pop(0)
-                if chunk_segs:
-                    prev_chunk_text = " ".join(seg["text"] for seg in chunk_segs)
-                    segments.extend(chunk_segs)
+            if prepared_bytes is not None:
+                result = _call_full_transcription(
+                    prepared_bytes,
+                    prepared_filename or "audio.webm",
+                    prompt,
+                    model_override=used_model,
+                )
+                raw_text = _without_prompt_echo(getattr(result, "text", "") or "")
+                eff_duration = total_duration if total_duration > 0 else max(1.0, len(raw_text.split()) / 2.5)
+                start_anchor = 0.0
+                if live_first_start > 0.5 and live_first_start < eff_duration * 0.5:
+                    start_anchor = max(0.0, live_first_start - 0.3)
+                segments = _extract_result_segments(result, 0.0, start_anchor, eff_duration)
+            else:
+                chunk_specs = _split_audio_with_ffmpeg(fallback_source, workdir, total_duration)
+                if not chunk_specs:
+                    raise RuntimeError(
+                        "El archivo supera 24 MB y ffmpeg no está disponible para dividir el audio."
+                    )
+
+                def _transcribe_chunk(spec):
+                    chunk_path, chunk_start, chunk_end = spec
+                    chunk_result = _call_full_transcription(
+                        chunk_path.read_bytes(),
+                        chunk_path.name,
+                        prompt,
+                        model_override=used_model,
+                    )
+                    return chunk_start, chunk_end, chunk_result
+
+                with ThreadPoolExecutor(max_workers=min(3, len(chunk_specs))) as pool:
+                    chunk_results = list(pool.map(_transcribe_chunk, chunk_specs))
+                segments = _merge_chunk_results(chunk_results)
 
     elapsed_ms = int(round((time.perf_counter() - started) * 1000))
     total_chars = sum(len(seg["text"]) for seg in segments)
     print(
-        f"[TIME final-transcribe] api={elapsed_ms}ms segments={len(segments)} chars={total_chars}",
+        f"[TIME final-transcribe] model={used_model} api={elapsed_ms}ms segments={len(segments)} chars={total_chars}",
         flush=True,
     )
     return segments

@@ -589,7 +589,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
             />
           </>
         )}
-        {hasTranscript && <TechnicalTranscript segments={segments} vocabulary={vocabulary} />}
+        {hasTranscript && (
+          <TechnicalTranscript
+            segments={segments}
+            vocabulary={vocabulary}
+            muletillas={muletillas}
+          />
+        )}
       </div>
 
       {/* Dictamen, observaciones y guardado */}
