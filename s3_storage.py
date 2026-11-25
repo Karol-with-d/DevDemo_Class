@@ -109,6 +109,17 @@ def read_video_object(key):
     return body, content_type
 
 
+def delete_video_object(key):
+    if not str(key).startswith("recordings/"):
+        raise RuntimeError("Clave de video no válida.")
+    settings = _require_settings()
+    client = _client(settings["region"])
+    try:
+        client.delete_object(Bucket=settings["bucket"], Key=key)
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Error de S3: {exc}") from exc
+
+
 def upload_evaluation_json(session_id, evaluation_data):
     """Guarda la rúbrica y el reporte cuantitativo en recordings/{session}/evaluation.json."""
     settings = _require_settings()
@@ -138,8 +149,10 @@ def read_evaluation_json(session_id):
     try:
         obj = client.get_object(Bucket=settings["bucket"], Key=key)
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404"):
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        # Missing objects often come back as AccessDenied if the IAM user
+        # cannot ListBucket. That is not a failed rubric load.
+        if code in ("NoSuchKey", "404", "AccessDenied", "403"):
             return None
         raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
     except BotoCoreError as exc:
@@ -147,14 +160,3 @@ def read_evaluation_json(session_id):
 
     raw = obj["Body"].read().decode("utf-8")
     return json.loads(raw)
-
-
-def delete_video_object(key):
-    if not str(key).startswith("recordings/"):
-        raise RuntimeError("Clave de video no válida.")
-    settings = _require_settings()
-    client = _client(settings["region"])
-    try:
-        client.delete_object(Bucket=settings["bucket"], Key=key)
-    except (BotoCoreError, ClientError) as exc:
-        raise RuntimeError(f"Error de S3: {exc}") from exc

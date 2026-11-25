@@ -7,12 +7,24 @@ export type TechnicalTerm = {
   term: string;
   lemma?: string;
   category?: string;
+  section?: string;
 };
 
 export type TranscriptCue = {
   start: number;
   end?: number;
   text: string;
+};
+
+const SECTION_ORDER = ["javascript", "react", "node", "python", "fastapi", "general"];
+
+const SECTION_LABELS: Record<string, string> = {
+  javascript: "JavaScript / TypeScript",
+  react: "React / Next.js",
+  node: "Node.js / Express",
+  python: "Python",
+  fastapi: "FastAPI",
+  general: "General",
 };
 
 // Keep in sync with vocab_extractor._MULETILLA_PATTERNS (multi-word phrases first).
@@ -60,6 +72,19 @@ function cueClock(seconds: number) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function groupBySection(terms: TechnicalTerm[]) {
+  const groups = new Map<string, TechnicalTerm[]>();
+  for (const item of terms) {
+    const key = item.section || "general";
+    const list = groups.get(key) ?? [];
+    list.push(item);
+    groups.set(key, list);
+  }
+  return [...groups.entries()].sort(
+    (a, b) => SECTION_ORDER.indexOf(a[0]) - SECTION_ORDER.indexOf(b[0]),
+  );
 }
 
 function highlightMuletillas(text: string, keyPrefix: string): ReactNode[] {
@@ -137,29 +162,37 @@ export function TechnicalTranscript({
   vocabulary: TechnicalTerm[];
   muletillas?: MuletillasSummary | null;
 }) {
+  const groups = groupBySection(vocabulary);
   const muletillaItems = muletillas?.items ?? [];
   const hasMuletillas = (muletillas?.total ?? 0) > 0;
 
   return (
     <>
-      {(vocabulary.length > 0 || hasMuletillas) && (
-        <div className="mb-4 flex flex-col gap-3 w-full text-left">
-          {vocabulary.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#82918f]">
+      {(groups.length > 0 || hasMuletillas) && (
+        <div className="mb-4 flex w-full flex-col gap-3 text-left">
+          {groups.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-[#82918f]">
                 Vocabulario técnico
               </p>
-              <ul className="flex flex-wrap gap-2">
-                {vocabulary.map((item) => (
-                  <li
-                    key={item.term}
-                    className="rounded-full border border-[#9ce4c1]/40 bg-[#9ce4c1]/10 px-3 py-1 text-xs font-semibold text-[#9ce4c1]"
-                    title={item.category || item.lemma}
-                  >
-                    {item.term}
-                  </li>
-                ))}
-              </ul>
+              {groups.map(([section, terms]) => (
+                <div key={section}>
+                  <p className="mb-1.5 text-[11px] font-semibold text-[#9ce4c1]">
+                    {SECTION_LABELS[section] || section}
+                  </p>
+                  <ul className="flex flex-wrap gap-2">
+                    {terms.map((item) => (
+                      <li
+                        key={`${section}-${item.term}`}
+                        className="rounded-full border border-[#9ce4c1]/40 bg-[#9ce4c1]/10 px-3 py-1 text-xs font-semibold text-[#9ce4c1]"
+                        title={item.category || item.lemma}
+                      >
+                        {item.term}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
           )}
 

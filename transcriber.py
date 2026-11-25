@@ -626,7 +626,6 @@ def attach_video_key(session_id, video_key, *, metadata=None):
         _write_session_json(path, payload)
         return payload
 
-
 def attach_evaluation_report(session_id, evaluation_data, *, source):
     session_id = safe_session_id(session_id)
     directory = os.path.join(RECORDINGS_DIR, session_id)
@@ -1311,6 +1310,8 @@ def list_saved_recordings():
                 "segments": payload.get("segments") or [],
                 "vocabulary": payload.get("vocabulary") or [],
                 "muletillas": payload.get("muletillas") or {},
+                "evaluation": payload.get("evaluation"),
+                "evaluatedAt": payload.get("evaluatedAt"),
                 "videoMetrics": payload.get("videoMetrics"),
             }
         )

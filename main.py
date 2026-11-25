@@ -369,8 +369,8 @@ async def get_evaluation(session_id: str):
         try:
             s3_evaluation = await asyncio.to_thread(read_evaluation_json, session_id)
         except RuntimeError as exc:
-            if not local_evaluation:
-                raise HTTPException(status_code=503, detail="No se pudo consultar la evaluación guardada.") from exc
+            print(f"[WARN] Evaluación S3 no disponible: {exc}")
+            s3_evaluation = None
 
     return {
         "ok": True,

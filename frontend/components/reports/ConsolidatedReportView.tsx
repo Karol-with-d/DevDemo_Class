@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { evaluateVocabLevel } from "../../lib/vocabLevel";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
 import {
   getEvaluation,
@@ -42,6 +43,8 @@ interface ConsolidatedReportViewProps {
   evaluatorName?: string;
   technology?: string;
   complexity?: string;
+  initialSegments?: TranscriptSegment[];
+  initialVocabulary?: TechnicalTerm[];
 }
 
 const SCALE_OPTIONS: { code: UnivoScale; label: string; score: number }[] = [
@@ -123,6 +126,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   evaluatorName = "",
   technology = "",
   complexity = "",
+  initialSegments = [],
+  initialVocabulary = [],
 }) => {
   const [dimensions, setDimensions] = useState<DimensionItem[]>(INITIAL_DIMENSIONS);
   const [verdict, setVerdict] = useState<VerdictOption | null>(null);
@@ -171,7 +176,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       try {
         context = await getEvaluation(sessionId, signal);
       } catch {
-        if (!signal.aborted) setLoadState("error");
+        if (signal.aborted) return;
+        setSegments(initialSegments);
+        setVocabulary(initialVocabulary);
+        setLoadState("ready");
+        if (autoSuggest && initialSegments.some(({ text }) => text.trim())) {
+          await requestSuggestions(signal);
+        }
         return;
       }
       if (signal.aborted) return;
@@ -245,6 +256,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const hasTranscript = segments.some(({ text }) => text.trim());
   const hasAnalysisData = hasTranscript || Boolean(videoMetrics);
   const terms = vocabulary.map(({ term }) => term);
+  const vocabGate = useMemo(
+    () => evaluateVocabLevel(complexity, vocabulary.length),
+    [complexity, vocabulary.length],
+  );
 
   const buildEvaluationPayload = () => ({
     sessionId,
@@ -258,6 +273,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       averageScore: metrics.avgScore,
       scaleDistribution: metrics.counts,
       nlpTermsCount: terms.length,
+      vocabLevelMet: vocabGate.ok,
+      vocabLevelRule: vocabGate.rule,
     },
     videoMetrics,
     muletillas,
@@ -485,6 +502,27 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
+      <div
+        className={`rounded-xl border p-4 text-sm ${
+          vocabGate.ok
+            ? "border-emerald-500/40 bg-emerald-950/40 text-emerald-200"
+            : "border-amber-500/40 bg-amber-950/30 text-amber-200"
+        }`}
+      >
+        <p className="font-semibold">
+          Análisis PNL · {complexity || "Básico"} · {vocabGate.count} términos
+        </p>
+        <p className="mt-1 text-xs opacity-90">{vocabGate.message}</p>
+      </div>
+
+      {hasTranscript && (
+        <TechnicalTranscript
+          segments={segments}
+          vocabulary={vocabulary}
+          muletillas={muletillas}
+        />
+      )}
+
       {/* Barra de resumen cuantitativo + vista detalle */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -588,13 +626,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               onScoreChange={handleScoreChange}
             />
           </>
-        )}
-        {hasTranscript && (
-          <TechnicalTranscript
-            segments={segments}
-            vocabulary={vocabulary}
-            muletillas={muletillas}
-          />
         )}
       </div>
 
