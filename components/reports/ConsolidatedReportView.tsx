@@ -49,7 +49,7 @@ const VERDICT_OPTIONS: VerdictOption[] = [
 const QUICK_TAGS = [
   "Buena activación de saberes previos",
   "Manejo claro del tiempo y cierre",
-  "Buen dominio técnico y vocabulario PNL",
+  "Buen dominio técnico y vocabulario clave",
   "Fomentar mayor participación estudiantil",
   "Reforzar retroalimentación de errores",
 ];
@@ -58,16 +58,19 @@ const INITIAL_DIMENSIONS: DimensionItem[] = [
   {
     id: "innovacion_actualizacion",
     title: "Innovación y Actualización",
-    univoScope: "Ítems 1–6 · Puntualidad, competencia, pre-saberes, dicción, recursos y PNL",
+    univoScope:
+      "Ítems 1–6 · Puntualidad, competencia, pre-saberes, dicción, recursos y vocabulario técnico",
     aiScore: 88,
     adjustedScore: 88,
     scale: "MB",
-    feedback: "Buen ritmo vocal, uso de recursos tecnológicos y terminología técnica pertinente.",
+    feedback:
+      "Buen ritmo vocal, uso de recursos tecnológicos y terminología técnica pertinente.",
   },
   {
     id: "calidad_ensenanza",
     title: "Calidad de la Enseñanza",
-    univoScope: "Ítems 7–14 · Plan de clase, distribución del tiempo, dominio y estrategias",
+    univoScope:
+      "Ítems 7–14 · Plan de clase, distribución del tiempo, dominio y estrategias",
     aiScore: 85,
     adjustedScore: 85,
     scale: "MB",
@@ -76,20 +79,24 @@ const INITIAL_DIMENSIONS: DimensionItem[] = [
   {
     id: "relacion_estudiantes",
     title: "Relación con los Estudiantes",
-    univoScope: "Ítems 15–20 · Respeto, conducción, ejemplos vivenciales, interés y consultas",
+    univoScope:
+      "Ítems 15–20 · Respeto, conducción, ejemplos vivenciales, interés y consultas",
     aiScore: 80,
     adjustedScore: 80,
     scale: "MB",
-    feedback: "Trato cordial y atención a consultas; se puede ampliar participación.",
+    feedback:
+      "Trato cordial y atención a consultas; se puede ampliar participación.",
   },
   {
     id: "evaluacion_retroalimentacion",
     title: "Evaluación y Retroalimentación",
-    univoScope: "Ítems 21–26 · Seguimiento, comprensión, retroalimentación y cierre",
+    univoScope:
+      "Ítems 21–26 · Seguimiento, comprensión, retroalimentación y cierre",
     aiScore: 78,
     adjustedScore: 78,
     scale: "B",
-    feedback: "Comprueba comprensión durante la sesión; reforzar síntesis final.",
+    feedback:
+      "Comprueba comprensión durante la sesión; reforzar síntesis final.",
   },
 ];
 
@@ -108,13 +115,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   technology = "",
   complexity = "",
 }) => {
-  const [dimensions, setDimensions] = useState<DimensionItem[]>(INITIAL_DIMENSIONS);
+  const [dimensions, setDimensions] =
+    useState<DimensionItem[]>(INITIAL_DIMENSIONS);
   const [verdict, setVerdict] = useState<VerdictOption>("Cumple adecuadamente");
   const [qualitativeNotes, setQualitativeNotes] = useState("");
   const [savedPayload, setSavedPayload] = useState<string | null>(null);
   const [s3Key, setS3Key] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [showAdvancedViews, setShowAdvancedViews] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
     type: "success" | "error" | "info";
     text: string;
@@ -150,10 +157,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               );
               if (!match) return item;
               const nextScore =
-                typeof match.finalScore === "number" ? match.finalScore : item.adjustedScore;
+                typeof match.finalScore === "number"
+                  ? match.finalScore
+                  : item.adjustedScore;
               return {
                 ...item,
-                aiScore: typeof match.aiScore === "number" ? match.aiScore : item.aiScore,
+                aiScore:
+                  typeof match.aiScore === "number" ? match.aiScore : item.aiScore,
                 adjustedScore: nextScore,
                 scale: match.scale || scoreToScale(nextScore),
               };
@@ -161,7 +171,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           );
         }
 
-        if (saved.overallVerdict && VERDICT_OPTIONS.includes(saved.overallVerdict)) {
+        if (
+          saved.overallVerdict &&
+          VERDICT_OPTIONS.includes(saved.overallVerdict)
+        ) {
           setVerdict(saved.overallVerdict);
         }
         if (typeof saved.qualitativeObservations === "string") {
@@ -171,7 +184,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         setSavedPayload(JSON.stringify(saved, null, 2));
         setStatusMessage({
           type: "info",
-          text: `Evaluación cargada desde ${data.source === "s3" ? "AWS S3" : "registro local"}.`,
+          text: `Evaluación cargada desde ${
+            data.source === "s3" ? "AWS S3" : "registro local"
+          }.`,
         });
       } catch {
         // No bloquear si el backend aún no arranca
@@ -188,10 +203,17 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     const avgScore =
       dimensions.length > 0
         ? Math.round(
-            dimensions.reduce((acc, d) => acc + d.adjustedScore, 0) / dimensions.length
+            dimensions.reduce((acc, d) => acc + d.adjustedScore, 0) /
+              dimensions.length
           )
         : 0;
-    const counts: Record<UnivoScale, number> = { E: 0, MB: 0, B: 0, R: 0, NM: 0 };
+    const counts: Record<UnivoScale, number> = {
+      E: 0,
+      MB: 0,
+      B: 0,
+      R: 0,
+      NM: 0,
+    };
     for (const d of dimensions) {
       counts[d.scale] += 1;
     }
@@ -221,11 +243,19 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     quantitativeSummary: {
       averageScore: metrics.avgScore,
       scaleDistribution: metrics.counts,
-      nlpTermsCount: sampleTerms.length,
+      technicalTermsCount: sampleTerms.length,
     },
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
-      ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback }) => ({
+      ({
+        id,
+        title,
+        univoScope,
+        aiScore,
+        adjustedScore,
+        scale,
+        feedback,
+      }) => ({
         id,
         label: title,
         univoScope,
@@ -236,14 +266,16 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         feedback,
       })
     ),
-    nlpDetectedTerms: sampleTerms,
+    technicalTermsDetected: sampleTerms,
     qualitativeObservations: qualitativeNotes,
   });
 
   const handleDownloadRubric = () => {
     const data = buildEvaluationPayload();
     const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const fileTitle = `Rubrica_${safeSessionId}_${new Date().toISOString().slice(0, 10)}`;
+    const fileTitle = `Rubrica_${safeSessionId}_${new Date()
+      .toISOString()
+      .slice(0, 10)}`;
 
     const rowsHtml = data.rubricScores
       .map(
@@ -298,12 +330,22 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
         <h1>Consolidado de Evaluación — Rúbrica UNIVO</h1>
         <div class="meta">
-          Sesión: <strong>${data.sessionId}</strong> · Candidato: <strong>${data.candidateName || "N/D"}</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
+          Sesión: <strong>${data.sessionId}</strong> · Candidato: <strong>${
+      data.candidateName || "N/D"
+    }</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
         </div>
         <div class="summary">
-          <div class="box">Promedio Final: <strong>${data.quantitativeSummary.averageScore}%</strong></div>
+          <div class="box">Promedio Final: <strong>${
+            data.quantitativeSummary.averageScore
+          }%</strong></div>
           <div class="box">Dictamen: <strong>${data.overallVerdict}</strong></div>
-          <div class="box">Escala: E:${data.quantitativeSummary.scaleDistribution.E} · MB:${data.quantitativeSummary.scaleDistribution.MB} · B:${data.quantitativeSummary.scaleDistribution.B} · R:${data.quantitativeSummary.scaleDistribution.R} · NM:${data.quantitativeSummary.scaleDistribution.NM}</div>
+          <div class="box">Escala: E:${
+            data.quantitativeSummary.scaleDistribution.E
+          } · MB:${data.quantitativeSummary.scaleDistribution.MB} · B:${
+      data.quantitativeSummary.scaleDistribution.B
+    } · R:${data.quantitativeSummary.scaleDistribution.R} · NM:${
+      data.quantitativeSummary.scaleDistribution.NM
+    }</div>
         </div>
         <table>
           <thead>
@@ -318,7 +360,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </table>
         <div class="notes">
           <strong>Observaciones del Evaluador:</strong>
-          <p style="margin:6px 0 0;">${data.qualitativeObservations || "Sin observaciones adicionales."}</p>
+          <p style="margin:6px 0 0;">${
+            data.qualitativeObservations || "Sin observaciones adicionales."
+          }</p>
         </div>
         <script>
           window.onload = function() { setTimeout(function() { window.print(); }, 250); };
@@ -403,7 +447,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       });
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : "No se pudo guardar la evaluación.";
+        err instanceof Error
+          ? err.message
+          : "No se pudo guardar la evaluación.";
       setStatusMessage({
         type: "error",
         text: `Error al guardar: ${message}`,
@@ -414,54 +460,49 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   };
 
   return (
-    <div className="max-w-5xl mx-auto p-6 space-y-6">
-      {/* Encabezado + KPIs rápidos + Descarga de rúbrica */}
+    <div className="mx-auto max-w-5xl space-y-6 p-6">
+      {/* Encabezado + KPIs rápidos + único botón de descarga de rúbrica */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
-          <h2 className="text-2xl font-bold text-white">Consolidado de Evaluación</h2>
+          <h2 className="text-2xl font-bold text-white">
+            Consolidado de Evaluación
+          </h2>
           <p className="text-xs text-slate-400">
-            Guía de Observación UNIVO · Escala E / MB / B / R / NM + Reporte Cuantitativo y PNL
+            Guía de Observación UNIVO · Escala E / MB / B / R / NM · Resumen
+            Cuantitativo y Vocabulario Técnico
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-emerald-400 border border-emerald-500/30">
+          <span className="rounded-full border border-emerald-500/30 bg-slate-900 px-3 py-1 font-mono text-xs text-emerald-400">
             Promedio: {metrics.avgScore}%
           </span>
-          <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-slate-300 border border-slate-700">
+          <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 font-mono text-xs text-slate-300">
             {sessionId}
           </span>
           <button
             type="button"
             onClick={handleDownloadRubric}
-            className="text-xs px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 font-medium border border-emerald-500/40 transition-colors cursor-pointer"
+            className="cursor-pointer rounded-lg border border-emerald-500/40 bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-emerald-300 transition-colors hover:bg-slate-800"
           >
             Descargar Rúbrica
           </button>
         </div>
       </div>
 
-      {/* Barra de resumen cuantitativo + vista detalle */}
-      <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+      {/* Barra de distribución por escala */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/90 p-4">
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-slate-400 mr-1">Distribución:</span>
+          <span className="mr-1 text-slate-400">Distribución:</span>
           {SCALE_OPTIONS.map((opt) => (
             <span
               key={opt.code}
-              className="px-2.5 py-1 rounded-md bg-slate-950 border border-slate-800 text-slate-200 font-mono"
+              className="rounded-md border border-slate-800 bg-slate-950 px-2.5 py-1 font-mono text-slate-200"
               title={opt.label}
             >
               {opt.code}: <strong>{metrics.counts[opt.code]}</strong>
             </span>
           ))}
         </div>
-
-        <button
-          type="button"
-          onClick={() => setShowAdvancedViews((v) => !v)}
-          className="text-xs px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-colors cursor-pointer"
-        >
-          {showAdvancedViews ? "Ocultar detalle PNL/Slider" : "Ver detalle PNL/Slider"}
-        </button>
       </div>
 
       {/* Rúbrica ágil por dimensiones UNIVO */}
@@ -469,12 +510,12 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         {dimensions.map((item) => (
           <div
             key={item.id}
-            className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4"
+            className="flex flex-col justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900 p-4 md:flex-row md:items-center"
           >
-            <div className="space-y-1 max-w-xl">
+            <div className="max-w-xl space-y-1">
               <div className="flex items-center gap-2">
-                <h3 className="font-semibold text-white text-sm">{item.title}</h3>
-                <span className="text-[11px] font-mono text-slate-400">
+                <h3 className="text-sm font-semibold text-white">{item.title}</h3>
+                <span className="font-mono text-[11px] text-slate-400">
                   IA: {item.aiScore} → {item.adjustedScore}
                 </span>
               </div>
@@ -482,7 +523,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               <p className="text-xs text-slate-400">{item.feedback}</p>
             </div>
 
-            <div className="flex flex-col items-start md:items-end gap-2">
+            <div className="flex flex-col items-start gap-2 md:items-end">
               <div className="flex items-center gap-1.5">
                 {SCALE_OPTIONS.map((opt) => {
                   const active = item.scale === opt.code;
@@ -492,10 +533,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                       type="button"
                       onClick={() => handleScaleSelect(item.id, opt.code)}
                       title={`${opt.code} — ${opt.label}`}
-                      className={`w-10 h-9 rounded-lg text-xs font-bold transition-colors cursor-pointer border ${
+                      className={`h-9 w-10 cursor-pointer rounded-lg border text-xs font-bold transition-colors ${
                         active
-                          ? "bg-emerald-600 text-white border-emerald-400"
-                          : "bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600"
+                          ? "border-emerald-400 bg-emerald-600 text-white"
+                          : "border-slate-800 bg-slate-950 text-slate-300 hover:border-slate-600"
                       }`}
                     >
                       {opt.code}
@@ -511,8 +552,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                   min={0}
                   max={100}
                   value={item.adjustedScore}
-                  onChange={(e) => handleScoreChange(item.id, Number(e.target.value))}
-                  className="w-16 bg-slate-950 border border-slate-800 rounded px-2 py-0.5 text-right text-slate-100 font-mono text-xs"
+                  onChange={(e) =>
+                    handleScoreChange(item.id, Number(e.target.value))
+                  }
+                  className="w-16 rounded border border-slate-800 bg-slate-950 px-2 py-0.5 text-right font-mono text-xs text-slate-100"
                 />
               </label>
             </div>
@@ -520,28 +563,27 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         ))}
       </div>
 
-      {/* Vista expandible opcional con componentes previos */}
-      {showAdvancedViews && (
-        <div className="space-y-4 pt-2">
-          <HybridRubricEditor
-            indicators={legacyIndicators}
-            onScoreChange={handleScoreChange}
-          />
-          <NLPVocabularyViewer
-            transcript={sampleTranscript}
-            technicalTerms={sampleTerms}
-          />
-        </div>
-      )}
+      {/* Detalle completo visible de una vez (sin botón desplegable) */}
+      <div className="space-y-4 pt-2">
+        <HybridRubricEditor
+          indicators={legacyIndicators}
+          onScoreChange={handleScoreChange}
+        />
+        <NLPVocabularyViewer
+          transcript={sampleTranscript}
+          technicalTerms={sampleTerms}
+        />
+      </div>
 
       {/* Dictamen rápido + Chips + Observaciones y Guardado en S3 */}
-      <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
+      <div className="space-y-4 rounded-xl border border-emerald-500/30 bg-slate-900 p-6 text-white shadow-lg">
         <div>
           <h3 className="text-base font-semibold text-emerald-400">
             Dictamen y Observaciones del Evaluador
           </h3>
           <p className="text-xs text-slate-400">
-            Selecciona el dictamen general, haz clic en etiquetas rápidas o escribe observaciones adicionales.
+            Selecciona el dictamen general, haz clic en etiquetas rápidas o
+            escribe observaciones adicionales.
           </p>
         </div>
 
@@ -552,10 +594,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               key={option}
               type="button"
               onClick={() => setVerdict(option)}
-              className={`text-xs px-3.5 py-1.5 rounded-full border transition-colors cursor-pointer ${
+              className={`cursor-pointer rounded-full border px-3.5 py-1.5 text-xs transition-colors ${
                 verdict === option
-                  ? "bg-emerald-600/20 border-emerald-400 text-emerald-300 font-semibold"
-                  : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
+                  ? "border-emerald-400 bg-emerald-600/20 font-semibold text-emerald-300"
+                  : "border-slate-800 bg-slate-950 text-slate-400 hover:text-slate-200"
               }`}
             >
               {option}
@@ -572,10 +614,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                 key={tag}
                 type="button"
                 onClick={() => handleToggleTag(tag)}
-                className={`text-[11px] px-2.5 py-1 rounded-md border transition-colors cursor-pointer ${
+                className={`cursor-pointer rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
                   selected
-                    ? "bg-sky-500/20 border-sky-400 text-sky-300"
-                    : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
+                    ? "border-sky-400 bg-sky-500/20 text-sky-300"
+                    : "border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700"
                 }`}
               >
                 {selected ? "✓ " : "+ "}
@@ -589,28 +631,20 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           value={qualitativeNotes}
           onChange={(e) => setQualitativeNotes(e.target.value)}
           placeholder="Otras observaciones / sugerencias o elementos destacados (opcional si ya usaste etiquetas)..."
-          className="w-full h-24 bg-slate-950 text-slate-100 p-3.5 rounded-lg border border-slate-800 focus:outline-none focus:border-emerald-500 text-sm resize-none"
+          className="h-24 w-full resize-none rounded-lg border border-slate-800 bg-slate-950 p-3.5 text-sm text-slate-100 focus:border-emerald-500 focus:outline-none"
         />
 
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={handleSaveEvaluation}
-              disabled={isSaving}
-              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
-            >
-              {isSaving ? "Guardando en S3..." : "Guardar Evaluación Consolidada"}
-            </button>
-
-            <button
-              type="button"
-              onClick={handleDownloadRubric}
-              className="px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-slate-950 hover:bg-slate-800 text-emerald-300 font-medium text-sm transition-colors cursor-pointer"
-            >
-              Descargar Rúbrica
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleSaveEvaluation}
+            disabled={isSaving}
+            className="cursor-pointer rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-50"
+          >
+            {isSaving
+              ? "Guardando en S3..."
+              : "Guardar Evaluación Consolidada"}
+          </button>
 
           {statusMessage && (
             <span
@@ -629,11 +663,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
 
         {savedPayload && (
-          <div className="mt-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
-            <p className="text-xs text-slate-400 mb-2 font-mono">
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-4">
+            <p className="mb-2 font-mono text-xs text-slate-400">
               JSON persistido {s3Key ? `en S3 (${s3Key})` : ""}:
             </p>
-            <pre className="text-xs text-emerald-300 overflow-x-auto">{savedPayload}</pre>
+            <pre className="overflow-x-auto text-xs text-emerald-300">
+              {savedPayload}
+            </pre>
           </div>
         )}
       </div>
