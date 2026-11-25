@@ -69,7 +69,7 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
   const handleDelete = async (rec: SavedRecording) => {
     if (
       !window.confirm(
-        `¿Eliminar la grabación de ${rec.candidateName}? Se borra del sistema y de S3.`,
+        `¿Eliminar la grabación de ${rec.candidateName}?`,
       )
     ) {
       return;
@@ -151,7 +151,7 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
                   playsInline
                 />
               ) : (
-                <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video en S3.</p>
+                <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video guardado.</p>
               )}
               <TechnicalTranscript
                 segments={selected.segments ?? []}
