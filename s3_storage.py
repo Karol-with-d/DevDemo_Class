@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime
 
@@ -16,6 +17,24 @@ REQUIRED_ENV = (
     "AWS_BUCKET_NAME",
 )
 PRESIGN_EXPIRES = 3600
+
+
+def is_s3_configured():
+    return all(os.getenv(name) for name in REQUIRED_ENV)
+
+
+def _env_flag(name):
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_local_video_fallback():
+    """Opt-in local video storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_VIDEO_FALLBACK")
+
+
+def allow_local_evaluation_fallback():
+    """Opt-in local evaluation storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_EVALUATION_FALLBACK")
 
 
 def _require_settings():
@@ -90,22 +109,8 @@ def read_video_object(key):
     return body, content_type
 
 
-def delete_video_object(key):
-    if not str(key).startswith("recordings/"):
-        raise RuntimeError("Clave de video no válida.")
-    settings = _require_settings()
-    client = _client(settings["region"])
-    try:
-        client.delete_object(Bucket=settings["bucket"], Key=key)
-    except (BotoCoreError, ClientError) as exc:
-        raise RuntimeError(f"Error de S3: {exc}") from exc
-
-
-import json
-
-
 def upload_evaluation_json(session_id, evaluation_data):
-    """Guarda el JSON de la rúbrica y reporte cuantitativo en S3 bajo recordings/{session}/evaluation.json"""
+    """Guarda la rúbrica y el reporte cuantitativo en recordings/{session}/evaluation.json."""
     settings = _require_settings()
     session = safe_session_id(session_id)
     key = f"recordings/{session}/evaluation.json"
@@ -125,7 +130,7 @@ def upload_evaluation_json(session_id, evaluation_data):
 
 
 def read_evaluation_json(session_id):
-    """Lee el JSON de evaluación desde S3 si existe; devuelve None si aún no ha sido evaluado."""
+    """Lee la evaluación desde S3. Devuelve None si esa sesión aún no tiene una."""
     settings = _require_settings()
     session = safe_session_id(session_id)
     key = f"recordings/{session}/evaluation.json"
@@ -142,3 +147,14 @@ def read_evaluation_json(session_id):
 
     raw = obj["Body"].read().decode("utf-8")
     return json.loads(raw)
+
+
+def delete_video_object(key):
+    if not str(key).startswith("recordings/"):
+        raise RuntimeError("Clave de video no válida.")
+    settings = _require_settings()
+    client = _client(settings["region"])
+    try:
+        client.delete_object(Bucket=settings["bucket"], Key=key)
+    except (BotoCoreError, ClientError) as exc:
+        raise RuntimeError(f"Error de S3: {exc}") from exc

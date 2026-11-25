@@ -18,23 +18,36 @@ if __name__ == "__main__" and _port_is_open(HOST, PORT):
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 import asyncio
 import json
 import math
 import os
+import time
 
+from live_caption import relay_live_transcription
+from local_video_storage import LOCAL_VIDEO_PREFIX, local_video_path, store_local_video
+from pose_analyzer import PoseSessionAnalyzer, run_mediapipe_detection
+from rubric import suggest_rubric
 from transcriber import (
     TranscriptSession,
     attach_evaluation_report,
     attach_video_key,
+    attach_video_metrics,
     delete_local_session,
     list_saved_recordings,
     load_session_record,
-    transcribe_wav_bytes,
+    replace_session_transcript,
+    safe_session_id,
+    transcribe_recording_file,
+    transcribe_speed_demo,
 )
 from s3_storage import (
+    allow_local_evaluation_fallback,
+    allow_local_video_fallback,
     delete_video_object,
+    is_s3_configured,
+    media_type_for,
     read_evaluation_json,
     read_video_object,
     upload_evaluation_json,
@@ -43,6 +56,82 @@ from s3_storage import (
 
 # The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
 active_transcripts = {}
+# Post-recording full-audio transcription tasks keyed by session_id so reads await them.
+pending_transcriptions: dict[str, asyncio.Task] = {}
+
+
+async def await_pending_transcription(session_id: str) -> None:
+    task = pending_transcriptions.get(safe_session_id(session_id))
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[WARN] Transcripción final pendiente ({session_id}): {exc}", flush=True)
+
+
+async def await_all_pending_transcriptions() -> None:
+    tasks = list(pending_transcriptions.values())
+    if not tasks:
+        return
+    await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+
+
+def _schedule_final_transcription(
+    session_id: str,
+    *,
+    audio_bytes: bytes | None,
+    audio_filename: str,
+    audio_content_type: str,
+    video_path=None,
+    video_bytes: bytes | None = None,
+    video_filename: str = "recording.webm",
+    video_content_type: str = "video/webm",
+    metadata: dict | None = None,
+    duration_seconds: float = 0.0,
+) -> asyncio.Task:
+    key = safe_session_id(session_id)
+    previous = pending_transcriptions.get(key)
+    if previous and not previous.done():
+        previous.cancel()
+
+    async def _run():
+        try:
+            existing = load_session_record(key) or {}
+            live_segments = existing.get("segments") or []
+            segments = await asyncio.to_thread(
+                transcribe_recording_file,
+                audio_bytes=audio_bytes,
+                audio_filename=audio_filename,
+                audio_content_type=audio_content_type,
+                video_path=video_path,
+                video_bytes=video_bytes,
+                video_filename=video_filename,
+                video_content_type=video_content_type,
+                technology=(metadata or {}).get("technology") or existing.get("technology") or "",
+                duration_seconds=duration_seconds,
+                live_segments=live_segments,
+            )
+            if segments or not live_segments:
+                await asyncio.to_thread(replace_session_transcript, key, segments, metadata=metadata)
+            else:
+                print(
+                    f"[WARN] Transcripción final vacía para {key}; se conserva la transcripción en vivo.",
+                    flush=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[ERROR] Transcripción final ({key}): {exc}", flush=True)
+        finally:
+            if pending_transcriptions.get(key) is task:
+                pending_transcriptions.pop(key, None)
+
+    task = asyncio.create_task(_run())
+    pending_transcriptions[key] = task
+    return task
 
 app = FastAPI()
 
@@ -125,69 +214,208 @@ def read_root():
 @app.post("/upload-video")
 async def upload_video(
     file: UploadFile = File(...),
+    audio: UploadFile | None = File(None),
     sessionId: str = Form(""),
+    candidateName: str = Form(""),
+    evaluatorName: str = Form(""),
+    technology: str = Form(""),
+    complexity: str = Form(""),
+    durationSeconds: float = Form(0.0),
 ):
-    data = await file.read()
-    if not data:
+    if not await file.read(1):
         raise HTTPException(status_code=400, detail="El archivo de video está vacío.")
-    try:
-        result = await asyncio.to_thread(
-            upload_video_bytes,
-            data,
-            sessionId,
-            file.content_type or "video/webm",
-            file.filename or "recording.webm",
+    await file.seek(0)
+    session_id = safe_session_id(sessionId)
+    content_type = file.content_type or ""
+    filename = file.filename or ""
+    metadata = {
+        "candidateName": candidateName or "Candidato",
+        "evaluatorName": evaluatorName,
+        "technology": technology,
+        "complexity": complexity,
+    }
+
+    source = "local" if (not is_s3_configured() and allow_local_video_fallback()) else "s3"
+
+    audio_bytes = None
+    audio_filename = "audio.webm"
+    audio_content_type = "audio/webm"
+    if audio is not None:
+        raw_audio = await audio.read()
+        if raw_audio:
+            audio_bytes = raw_audio
+            audio_filename = audio.filename or "audio.webm"
+            audio_content_type = audio.content_type or "audio/webm"
+
+    transcription_task = None
+    if audio_bytes and (source == "local" or is_s3_configured()):
+        # Start full-audio transcription right away so it overlaps with S3/disk storage.
+        transcription_task = _schedule_final_transcription(
+            session_id,
+            audio_bytes=audio_bytes,
+            audio_filename=audio_filename,
+            audio_content_type=audio_content_type,
+            metadata=metadata,
+            duration_seconds=durationSeconds,
         )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        print(f"[ERROR] Subida a S3: {exc}")
-        raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
-    attach_video_key(sessionId, result["key"])
-    result["savedInSystem"] = True
-    return result
+
+    video_bytes = None
+    try:
+        if source == "s3":
+            video_bytes = await file.read()
+            try:
+                result = await asyncio.to_thread(
+                    upload_video_bytes, video_bytes, session_id, content_type, filename,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except Exception as exc:
+                print(f"[ERROR] Subida a S3: {exc}")
+                raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
+        else:
+            try:
+                result = await asyncio.to_thread(
+                    store_local_video, file.file, session_id, content_type, filename,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"[ERROR] Guardando video local: {exc}")
+                raise HTTPException(status_code=500, detail="No se pudo guardar el video localmente.") from exc
+
+        previous_key = (load_session_record(session_id) or {}).get("videoKey")
+        try:
+            if source == "local" and not local_video_path(result["key"]).is_file():
+                raise FileNotFoundError("El video local ya no está disponible.")
+            await asyncio.to_thread(attach_video_key, session_id, result["key"], metadata=metadata)
+        except (OSError, ValueError) as exc:
+            if source == "local":
+                try:
+                    local_video_path(result["key"]).unlink(missing_ok=True)
+                except (OSError, ValueError) as cleanup_error:
+                    print(f"[WARN] No se pudo eliminar el video sin registrar: {cleanup_error}")
+            print(f"[ERROR] Actualizando el historial del video: {exc}")
+            raise HTTPException(status_code=500, detail="No se pudo registrar el video en el historial.") from exc
+    except BaseException:
+        if transcription_task is not None and not transcription_task.done():
+            transcription_task.cancel()
+        raise
+
+    if previous_key and previous_key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            local_video_path(previous_key).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            print(f"[WARN] No se pudo eliminar la versión anterior del video local: {exc}")
+
+    if transcription_task is None:
+        transcription_task = _schedule_final_transcription(
+            session_id,
+            audio_bytes=None,
+            audio_filename=audio_filename,
+            audio_content_type=audio_content_type,
+            video_path=local_video_path(result["key"]) if source == "local" else None,
+            video_bytes=video_bytes if source == "s3" else None,
+            video_filename=filename or "recording.webm",
+            video_content_type=content_type or "video/webm",
+            metadata=metadata,
+            duration_seconds=durationSeconds,
+        )
+
+    transcript_status = "ready" if transcription_task.done() else "processing"
+    return {**result, "source": source, "savedInSystem": True, "transcriptStatus": transcript_status}
 
 
 @app.get("/recordings")
-def get_recordings():
+async def get_recordings():
+    await await_all_pending_transcriptions()
     return {"recordings": list_saved_recordings()}
+
 
 @app.post("/evaluations/{session_id}")
 async def save_evaluation(session_id: str, payload: dict):
     if not payload:
         raise HTTPException(status_code=400, detail="Los datos de evaluación están vacíos.")
-    try:
-        s3_res = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        print(f"[ERROR] Guardando evaluación en S3: {exc}")
-        raise HTTPException(status_code=502, detail="No se pudo guardar la evaluación en S3.") from exc
 
-    attach_evaluation_report(session_id, payload)
-    return {"ok": True, "sessionId": session_id, **s3_res}
+    use_local = (not is_s3_configured()) and allow_local_evaluation_fallback()
+    source = "local" if use_local else "s3"
+    result = {"key": None, "savedInS3": False}
+    if source == "s3":
+        try:
+            result = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            print(f"[ERROR] Guardando evaluación en S3: {exc}")
+            raise HTTPException(status_code=502, detail="No se pudo guardar la evaluación en S3.") from exc
+
+    try:
+        attach_evaluation_report(session_id, payload, source=source)
+    except OSError as exc:
+        print(f"[ERROR] Guardando evaluación local: {exc}")
+        detail = (
+            "Se guardó en AWS S3, pero no se pudo actualizar el historial local."
+            if source == "s3"
+            else "No se pudo guardar la evaluación localmente."
+        )
+        raise HTTPException(status_code=500, detail=detail) from exc
+    return {"ok": True, "sessionId": session_id, "source": source, **result}
 
 
 @app.get("/evaluations/{session_id}")
 async def get_evaluation(session_id: str):
+    await await_pending_transcription(session_id)
+    record = load_session_record(session_id) or {}
+    local_evaluation = record.get("evaluation")
+    s3_evaluation = None
+    if is_s3_configured() and record.get("evaluationStorage") != "local":
+        try:
+            s3_evaluation = await asyncio.to_thread(read_evaluation_json, session_id)
+        except RuntimeError as exc:
+            if not local_evaluation:
+                raise HTTPException(status_code=503, detail="No se pudo consultar la evaluación guardada.") from exc
+
+    return {
+        "ok": True,
+        "source": "s3" if s3_evaluation is not None else "local" if local_evaluation else None,
+        "evaluation": s3_evaluation if s3_evaluation is not None else local_evaluation,
+        "segments": record.get("segments") or [],
+        "vocabulary": record.get("vocabulary") or [],
+        "muletillas": record.get("muletillas") or {},
+        "videoMetrics": record.get("videoMetrics"),
+    }
+
+
+@app.post("/evaluations/{session_id}/suggestions")
+async def get_rubric_suggestions(session_id: str):
+    await await_pending_transcription(session_id)
+    record = load_session_record(session_id)
+    if not record:
+        return {"dimensions": []}
     try:
-        s3_eval = await asyncio.to_thread(read_evaluation_json, session_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    if s3_eval is not None:
-        return {"ok": True, "source": "s3", "evaluation": s3_eval}
-
-    local_record = load_session_record(session_id)
-    if local_record and local_record.get("evaluation"):
-        return {"ok": True, "source": "local", "evaluation": local_record["evaluation"]}
-
-    return {"ok": True, "source": None, "evaluation": None}
-
+        dimensions = await asyncio.to_thread(suggest_rubric, record)
+    except Exception as exc:
+        print(f"[WARN] No se pudo generar la rúbrica: {type(exc).__name__}")
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudieron generar sugerencias. Puedes completar la rúbrica manualmente.",
+        ) from exc
+    return {"dimensions": dimensions}
 
 
 @app.get("/video")
 async def play_video(key: str, download: bool = False):
+    if key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            path = local_video_path(key)
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="No se encontró el video local.")
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=404, detail="No se encontró el video local.") from exc
+        return FileResponse(
+            path,
+            media_type=media_type_for(path.name),
+            filename=path.name,
+            content_disposition_type="attachment" if download else "inline",
+            headers={"Cache-Control": "private, no-cache"},
+        )
     try:
         data, content_type = await asyncio.to_thread(read_video_object, key)
     except RuntimeError as exc:
@@ -205,11 +433,23 @@ async def play_video(key: str, download: bool = False):
 
 @app.delete("/recordings/{session_id}")
 async def delete_recording(session_id: str):
+    pending_task = pending_transcriptions.pop(safe_session_id(session_id), None)
+    if pending_task is not None and not pending_task.done():
+        pending_task.cancel()
+        try:
+            await pending_task
+        except (asyncio.CancelledError, Exception):
+            pass
     record = load_session_record(session_id)
     if not record:
         raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
     video_key = record.get("videoKey")
-    if video_key:
+    if video_key and video_key.startswith(LOCAL_VIDEO_PREFIX):
+        try:
+            local_video_path(video_key).unlink(missing_ok=True)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
+    elif video_key:
         try:
             await asyncio.to_thread(delete_video_object, video_key)
         except RuntimeError as exc:
@@ -224,177 +464,42 @@ async def delete_recording(session_id: str):
         delete_local_session(session_id)
     except OSError as exc:
         print(f"[WARN] No se vació del todo la carpeta local: {exc}")
-        if load_session_record(session_id):
-            raise HTTPException(
-                status_code=500,
-                detail="El video se quitó de S3, pero Windows bloqueó la carpeta local. Recarga la biblioteca.",
-            ) from exc
+    if load_session_record(session_id):
+        raise HTTPException(status_code=500, detail="No se pudo quitar la sesión del historial.")
     return {"ok": True, "sessionId": session_id}
+
+
+@app.post("/demo/transcribe")
+async def demo_transcribe(file: UploadFile = File(...), language: str = Form("es")):
+    """Microphone speed test for gpt-transcribe. One clip in, text and timing out."""
+    data = await file.read()
+    if len(data) < 44:
+        raise HTTPException(status_code=400, detail="El audio llegó vacío.")
+    lang = language if language in {"es", "en"} else "es"
+    try:
+        return await asyncio.to_thread(transcribe_speed_demo, data, lang)
+    except Exception as exc:
+        print(f"[ERROR] Demo gpt-transcribe: {exc}")
+        detail = str(exc)
+        if "401" in detail or "expired" in detail.lower() or "invalid_api_key" in detail.lower():
+            raise HTTPException(
+                status_code=401,
+                detail="La clave de OpenAI expiró. Actualiza OPENAI_API_KEY en el archivo .env.",
+            ) from exc
+        raise HTTPException(status_code=502, detail="No se pudo transcribir ese fragmento.") from exc
 
 
 @app.websocket("/ws/transcription")
 async def websocket_transcription(websocket: WebSocket):
-    """Live subtitles for the camera recording. Audio arrives as WAV chunks."""
-    await websocket.accept()
-    print("[INFO] Transcripción conectada")
-    session = None
-    pending = None
-    whisper_auth_failed = False
-
-    async def reply_done():
-        await websocket.send_json({"type": "chunk-done"})
-
-    try:
-        while True:
-            message = await websocket.receive()
-            if message.get("type") == "websocket.disconnect":
-                break
-
-            text_frame = message.get("text")
-            if text_frame:
-                try:
-                    payload = json.loads(text_frame)
-                except json.JSONDecodeError:
-                    continue
-
-                kind = payload.get("type")
-                if kind == "start":
-                    session = TranscriptSession(
-                        session_id=payload.get("sessionId", ""),
-                        candidate_name=payload.get("candidateName", ""),
-                        evaluator_name=payload.get("evaluatorName", ""),
-                        technology=payload.get("technology", ""),
-                        complexity=payload.get("complexity", ""),
-                    )
-                    active_transcripts[session.session_id] = session
-                    pending = None
-                    await websocket.send_json({"type": "ready", "sessionId": session.session_id})
-                elif kind == "chunk":
-                    pending = payload
-                elif kind == "stop":
-                    owns_session = (
-                        session is not None
-                        and active_transcripts.get(session.session_id) is session
-                    )
-                    saved = session.write(analyze=True) if owns_session else None
-                    await websocket.send_json({"type": "saved", **(saved or {"segments": []})})
-                    break
-                continue
-
-            audio = message.get("bytes")
-            if audio is None or session is None:
-                continue
-            if active_transcripts.get(session.session_id) is not session:
-                await reply_done()
-                continue
-
-            meta = pending or {}
-            pending = None
-            if whisper_auth_failed:
-                await reply_done()
-                continue
-            try:
-                spoken = await asyncio.to_thread(
-                    transcribe_wav_bytes,
-                    audio,
-                    session.prompt_context(),
-                    session.style_prompt(),
-                )
-            except Exception as exc:
-                print(f"[ERROR] Whisper: {exc}")
-                detail = str(exc)
-                if "401" in detail or "expired" in detail.lower() or "invalid_api_key" in detail.lower():
-                    whisper_auth_failed = True
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "La clave de OpenAI expiró. Actualiza OPENAI_API_KEY en el archivo .env.",
-                    })
-                else:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "No se pudo transcribir ese fragmento.",
-                    })
-                continue
-
-            if spoken:
-                segment = session.add(meta.get("start", 0), meta.get("end", 0), spoken)
-                if segment:
-                    print(f"[SUB] {segment['start']:.1f}s {segment['text']}", flush=True)
-                    await websocket.send_json({"type": "subtitle", **segment})
-                    continue
-            await reply_done()
-    except WebSocketDisconnect:
-        print("[INFO] Transcripción desconectada")
-    except Exception as exc:
-        print(f"[ERROR] Error en transcripción: {exc}")
-    finally:
-        if session is not None and active_transcripts.get(session.session_id) is session:
-            session.write(analyze=True)
-            active_transcripts.pop(session.session_id, None)
-
-def _giro_desde_rostro(landmarks, matrix=None):
-    """Head turn from the face mesh. Finding a face is not the same as facing the camera."""
-    if matrix is not None:
-        # About 26 degrees. A profile like the screenshots is well past this.
-        yaw = math.atan2(float(matrix[0][2]), float(matrix[2][2]))
-        if abs(yaw) >= 0.45:
-            return "perfil"
-    if not landmarks or len(landmarks) < 455:
-        return None
-    nose = landmarks[1]
-    left_eye, right_eye = landmarks[33], landmarks[263]
-    left_cheek, right_cheek = landmarks[234], landmarks[454]
-    chin = landmarks[152]
-    width = max(abs(right_cheek.x - left_cheek.x), 1e-4)
-    yaw = abs(nose.x - (left_cheek.x + right_cheek.x) / 2.0) / width
-    depth = abs(left_cheek.z - right_cheek.z)
-    eye_span = max(abs(right_eye.x - left_eye.x), 1e-4)
-    pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / eye_span
-    if yaw >= 0.30 or depth >= 0.08 or (yaw >= 0.20 and depth >= 0.045):
-        return "perfil"
-    if pitch >= 2.0 or nose.y >= 0.86 or chin.y >= 0.97:
-        return "abajo"
-    return None
-
-
-def _giro_desde_pose(landmarks):
-    """Backup when the face mesh drops: profile ears, or the head sunk to the frame edge."""
-    if not landmarks or len(landmarks) < 9:
-        return None
-    nose = landmarks[0]
-    left_eye, right_eye = landmarks[2], landmarks[5]
-    left_ear, right_ear = landmarks[7], landmarks[8]
-    if nose.y >= 0.82 or (
-        left_eye.visibility > 0.3
-        and right_eye.visibility > 0.3
-        and left_eye.y >= 0.75
-        and right_eye.y >= 0.75
-    ):
-        return "abajo"
-    if left_eye.visibility > 0.3 and right_eye.visibility > 0.3:
-        span = max(abs(left_eye.x - right_eye.x), 0.015)
-        pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / span
-        if pitch >= 2.4:
-            return "abajo"
-    if left_ear.visibility > 0.45 and right_ear.visibility > 0.45 and nose.visibility > 0.35:
-        span = max(abs(left_ear.x - right_ear.x), 1e-4)
-        asym = abs(abs(nose.x - left_ear.x) - abs(nose.x - right_ear.x)) / span
-        if asym >= 0.85:
-            return "perfil"
-    return None
-
-
-_MENSAJE_GIRO = {
-    "espaldas": ("¡Atención! De espaldas a la cámara", "Sin contacto visual (De espaldas)"),
-    "perfil": ("De perfil: no mira a la cámara", "Sin contacto visual (De perfil)"),
-    "abajo": ("Cabeza baja o fuera de cuadro", "Sin contacto visual (Cabeza baja)"),
-}
-
+    """Live subtitles. The browser streams PCM and this process talks to gpt-live-transcribe."""
+    await relay_live_transcription(websocket)
 
 @app.websocket("/ws/pose-analysis")
 async def websocket_pose_analysis(websocket: WebSocket):
     await websocket.accept()
-    print("[INFO] Cliente conectado via WebSocket")
+    raw_session_id = (websocket.query_params.get("sessionId") or "").strip()
+    session_id = safe_session_id(raw_session_id) if raw_session_id else None
+    print(f"[INFO] Cliente conectado via WebSocket (pose session={session_id or 'anon'})")
 
     if cv2 is None or np is None:
         print("[WARN] Análisis de pose omitido: OpenCV/MediaPipe no disponible")
@@ -417,270 +522,87 @@ async def websocket_pose_analysis(websocket: WebSocket):
             print("[INFO] Cliente desconectado del WebSocket")
         return
 
-    prev_center_x, prev_center_y = None, None
-    smooth_center_x, smooth_center_y = None, None
-    historial_movimiento = []
-    historial_espaldas = []
-    espalda_activa = False
-    motivo_sostenido = None
-    frames_sin_pose = 0
-    VENTANA_FRAMES = 90
-    MIN_MUESTRAS_MOVIMIENTO = 30
-    # About three camera frames. One noisy frame must not raise the banner.
-    VENTANA_ESPALDAS = 4
-    # Pose landmarks jitter while the teacher stands still. Movement has to clear
-    # that noise, and a one-frame leap is a bad detection, not walking.
-    UMBRAL_MOVIMIENTO = 0.10
-    UMBRAL_SALTO = 0.65
-    SUAVIZADO = 0.35
+    analyzer = PoseSessionAnalyzer()
+    pose_frames = 0
+    pose_slow = 0
+    saved_frames = 0
+
+    async def persist_metrics() -> None:
+        nonlocal saved_frames
+        if not session_id or pose_frames <= saved_frames:
+            return
+        summary = analyzer.summary()
+        if not summary:
+            return
+        try:
+            await asyncio.to_thread(attach_video_metrics, session_id, summary)
+            saved_frames = pose_frames
+            print(
+                f"[INFO] Métricas de video guardadas ({session_id}): "
+                f"frames={summary['framesAnalyzed']} frente={summary['orientation']['facingCameraPct']}% "
+                f"contacto={summary['eyeContact']['directPct']}%",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[WARN] No se guardaron métricas de video ({session_id}): {exc}", flush=True)
 
     try:
         while True:
-            # Recibir fotograma binario de la cámara
-            bytes_data = await websocket.receive_bytes()
-            np_arr = np.frombuffer(bytes_data, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
 
-            if frame is None:
+            text = message.get("text")
+            if text:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") == "flush":
+                    await persist_metrics()
                 continue
 
-            h, w, _ = frame.shape
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            bytes_data = message.get("bytes")
+            if not bytes_data:
+                continue
 
-            # Ejecutar inferencia para pose y rostro
-            pose_result = pose_landmarker.detect(mp_image) if pose_landmarker else None
-            face_result = face_landmarker.detect(mp_image) if face_landmarker else None
+            frame_started = time.perf_counter()
 
-            # Valores por defecto
-            alerta_movilidad = "Analizando..."
-            alerta_gestos = "Buscando docente..."
-            color_alerta = "#9ca3af"
+            # Run JPEG decode + MediaPipe inference off the event loop so live audio
+            # transcription and HTTP requests are never blocked by camera frames.
+            detected = await asyncio.to_thread(
+                run_mediapipe_detection,
+                bytes_data,
+                cv2_mod=cv2,
+                np_mod=np,
+                mp_mod=mp,
+                pose_landmarker=pose_landmarker,
+                face_landmarker=face_landmarker,
+            )
+            if detected is None:
+                continue
 
-            alerta_orientacion = "Buscando docente..."
-            color_orientacion = "#9ca3af"
-            es_de_espaldas = False
-            alerta_expresion = "Buscando rostro..."
-            alerta_contacto = "Buscando rostro..."
-            color_contacto = "#9ca3af"
+            w, h, pose_result, face_result = detected
+            metrics = analyzer.analyze(pose_result, face_result, w, h)
 
-            pose_detected = pose_result and pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0
-            face_detected = face_result and face_result.face_landmarks and len(face_result.face_landmarks) > 0
-            frame_de_espaldas = False
+            pose_ms = int(round((time.perf_counter() - frame_started) * 1000))
+            pose_frames += 1
+            if pose_ms >= 200:
+                pose_slow += 1
+            if pose_ms >= 200 or pose_frames % 30 == 0:
+                print(
+                    f"[TIME pose] frame={pose_ms}ms bytes={len(bytes_data)} slow={pose_slow}/{pose_frames}",
+                    flush=True,
+                )
 
-            if pose_detected:
-                landmarks = pose_result.pose_landmarks[0]
-
-                # Puntos anatómicos principales
-                nose = landmarks[0]
-                left_ear, right_ear = landmarks[7], landmarks[8]
-                shoulder_left, shoulder_right = landmarks[11], landmarks[12]
-                wrist_left, wrist_right = landmarks[15], landmarks[16]
-                hip_left, hip_right = landmarks[23], landmarks[24]
-
-                # --- 1. DETECCIÓN DE ORIENTACIÓN: DAR LA ESPALDA A LA CÁMARA ---
-                shoulders_visible = (shoulder_left.visibility > 0.35 and shoulder_right.visibility > 0.35)
-                # En vista frontal: shoulder_left.x > shoulder_right.x
-                # De espaldas: shoulder_left.x < shoulder_right.x (inversión de hombros)
-                shoulder_diff = shoulder_left.x - shoulder_right.x
-
-                # Comprobación de profundidad relativa de la nariz
-                nose_behind_ears = (nose.z > left_ear.z and nose.z > right_ear.z) or (nose.visibility < 0.25)
-
-                if shoulders_visible and shoulder_diff < -0.04:
-                    frame_de_espaldas = True
-                elif (not face_detected) and nose_behind_ears and shoulders_visible:
-                    frame_de_espaldas = True
-
-                # --- 2. EVALUACIÓN DE GESTOS ---
-                altura_cadera = (hip_left.y + hip_right.y) / 2 if (hip_left.visibility > 0.3 and hip_right.visibility > 0.3) else 0.85
-                manos_elevadas = (wrist_left.visibility > 0.4 and wrist_left.y < altura_cadera) or \
-                                 (wrist_right.visibility > 0.4 and wrist_right.y < altura_cadera)
-                alerta_gestos = "Buen uso de gesticulación" if manos_elevadas else "Gestos limitados (Manos bajas)"
-
-                # --- 3. EVALUACIÓN DE MOVILIDAD ---
-                frames_sin_pose = 0
-                hombros_confiables = shoulder_left.visibility > 0.5 and shoulder_right.visibility > 0.5
-                ancho_hombros = max(math.hypot((shoulder_left.x - shoulder_right.x) * w, (shoulder_left.y - shoulder_right.y) * h), 1.0)
-                center_x = ((shoulder_left.x + shoulder_right.x) / 2) * w
-                center_y = ((shoulder_left.y + shoulder_right.y) / 2) * h
-
-                if hombros_confiables:
-                    if smooth_center_x is None or prev_center_x is None:
-                        smooth_center_x, smooth_center_y = center_x, center_y
-                        prev_center_x, prev_center_y = center_x, center_y
-                    else:
-                        candidato_x = SUAVIZADO * center_x + (1.0 - SUAVIZADO) * smooth_center_x
-                        candidato_y = SUAVIZADO * center_y + (1.0 - SUAVIZADO) * smooth_center_y
-                        desplazamiento_relativo = math.hypot(
-                            candidato_x - prev_center_x, candidato_y - prev_center_y
-                        ) / ancho_hombros
-
-                        if desplazamiento_relativo >= UMBRAL_SALTO:
-                            smooth_center_x, smooth_center_y = center_x, center_y
-                            prev_center_x, prev_center_y = center_x, center_y
-                        else:
-                            smooth_center_x, smooth_center_y = candidato_x, candidato_y
-                            prev_center_x, prev_center_y = candidato_x, candidato_y
-                            historial_movimiento.append(1 if desplazamiento_relativo > UMBRAL_MOVIMIENTO else 0)
-                            if len(historial_movimiento) > VENTANA_FRAMES:
-                                historial_movimiento.pop(0)
-
-                if len(historial_movimiento) >= MIN_MUESTRAS_MOVIMIENTO:
-                    movimiento_promedio = sum(historial_movimiento) / len(historial_movimiento)
-
-                    if movimiento_promedio > 0.40:
-                        alerta_movilidad = "Excelente dinamismo corporal"
-                        color_alerta = "#22c55e" # Verde
-                    elif movimiento_promedio > 0.15:
-                        alerta_movilidad = "Movilidad moderada"
-                        color_alerta = "#eab308" # Amarillo
-                    else:
-                        alerta_movilidad = "Docente muy estático"
-                        color_alerta = "#ef4444" # Rojo
-                else:
-                    alerta_movilidad = "Analizando movilidad..."
-                    color_alerta = "#9ca3af"
-            else:
-                frames_sin_pose += 1
-                if frames_sin_pose > 8:
-                    prev_center_x, prev_center_y = None, None
-                    smooth_center_x, smooth_center_y = None, None
-                    historial_movimiento.clear()
-                    if not face_detected:
-                        historial_espaldas.clear()
-                        espalda_activa = False
-                        motivo_sostenido = None
-
-            # A face mesh used to force "facing the audience". Profile and a head
-            # dropped to the bottom of the frame are the cases that must alert.
-            matriz_rostro = None
-            if face_detected and getattr(face_result, "facial_transformation_matrixes", None):
-                matriz_rostro = face_result.facial_transformation_matrixes[0]
-            giro_rostro = _giro_desde_rostro(face_result.face_landmarks[0], matriz_rostro) if face_detected else None
-            giro_pose = _giro_desde_pose(landmarks) if pose_detected else None
-            if frame_de_espaldas:
-                motivo_frame = "espaldas"
-            elif giro_rostro:
-                motivo_frame = giro_rostro
-            elif giro_pose:
-                motivo_frame = giro_pose
-            else:
-                motivo_frame = None
-
-            if pose_detected or face_detected:
-                historial_espaldas.append(1 if motivo_frame else 0)
-                if len(historial_espaldas) > VENTANA_ESPALDAS:
-                    historial_espaldas.pop(0)
-                votos_espaldas = sum(historial_espaldas)
-                if not espalda_activa and len(historial_espaldas) >= 3 and votos_espaldas >= 3:
-                    espalda_activa = True
-                elif espalda_activa and votos_espaldas <= 1:
-                    espalda_activa = False
-                    if not motivo_frame:
-                        motivo_sostenido = None
-                if motivo_frame:
-                    motivo_sostenido = motivo_frame
-
-            motivo_visible = motivo_frame or (motivo_sostenido if espalda_activa else None)
-            if espalda_activa and motivo_visible:
-                es_de_espaldas = True
-                alerta_orientacion = _MENSAJE_GIRO[motivo_visible][0]
-                color_orientacion = "#ef4444"
-            elif motivo_visible == "perfil":
-                alerta_orientacion = "De perfil (Giro parcial)"
-                color_orientacion = "#eab308"
-            elif motivo_visible == "abajo":
-                alerta_orientacion = "Cabeza baja o fuera de cuadro"
-                color_orientacion = "#eab308"
-            elif motivo_visible == "espaldas":
-                alerta_orientacion = "Girando de espaldas..."
-                color_orientacion = "#eab308"
-            elif face_detected or pose_detected:
-                alerta_orientacion = "Frente a la audiencia"
-                color_orientacion = "#22c55e"
-
-            # --- 4. MÉTRICAS FACIALES Y CONTACTO VISUAL ---
-            if motivo_visible:
-                alerta_contacto = _MENSAJE_GIRO[motivo_visible][1]
-                color_contacto = "#ef4444" if espalda_activa else "#eab308"
-                if motivo_visible == "espaldas":
-                    alerta_expresion = "No visible (De espaldas)"
-            if motivo_visible != "espaldas" and face_detected and face_result.face_blendshapes and len(face_result.face_blendshapes) > 0:
-                blendshapes = {b.category_name: b.score for b in face_result.face_blendshapes[0]}
-
-                # Sonrisa y amabilidad
-                smile_score = (blendshapes.get("mouthSmileLeft", 0) + blendshapes.get("mouthSmileRight", 0)) / 2.0
-                if smile_score > 0.20:
-                    alerta_expresion = "Expresión cordial / Sonrisa"
-                else:
-                    alerta_expresion = "Expresión atenta / Neutral"
-
-                # Parpadeo / Ojos cerrados
-                ojos_cerrados = blendshapes.get("eyeBlinkLeft", 0) > 0.65 and blendshapes.get("eyeBlinkRight", 0) > 0.65
-
-                # Mirada lateral coordinada (ambos ojos mirando marcadamente a un lado)
-                mira_izq = blendshapes.get("eyeLookOutLeft", 0) > 0.55 and blendshapes.get("eyeLookInRight", 0) > 0.55
-                mira_der = blendshapes.get("eyeLookOutRight", 0) > 0.55 and blendshapes.get("eyeLookInLeft", 0) > 0.55
-                mira_arriba = blendshapes.get("eyeLookUpLeft", 0) > 0.65 and blendshapes.get("eyeLookUpRight", 0) > 0.65
-                mira_abajo = blendshapes.get("eyeLookDownLeft", 0) > 0.75 and blendshapes.get("eyeLookDownRight", 0) > 0.75
-
-                if not motivo_visible:
-                    if ojos_cerrados:
-                        alerta_contacto = "Ojos cerrados"
-                        color_contacto = "#eab308" # Amarillo
-                    elif mira_izq or mira_der or mira_arriba or mira_abajo:
-                        alerta_contacto = "Mirada desviada"
-                        color_contacto = "#eab308" # Amarillo
-                    else:
-                        alerta_contacto = "Contacto visual directo"
-                        color_contacto = "#22c55e" # Verde
-            elif motivo_visible:
-                pass
-            elif pose_detected:
-                # Fallback con Pose Landmarker (cuando FaceLandmarker no detecta por distancia o luz)
-                eye_left, eye_right = landmarks[2], landmarks[5]
-                nose = landmarks[0]
-                ojos_visibles = (eye_left.visibility > 0.35 and eye_right.visibility > 0.35 and nose.visibility > 0.35)
-
-                if ojos_visibles:
-                    mid_eye_x = (eye_left.x + eye_right.x) / 2.0
-                    ancho_ojos = max(abs(eye_left.x - eye_right.x), 0.005)
-                    desviacion_nariz = abs(nose.x - mid_eye_x) / ancho_ojos
-
-                    if desviacion_nariz < 0.35:
-                        alerta_contacto = "Contacto visual directo"
-                        color_contacto = "#22c55e" # Verde
-                    else:
-                        alerta_contacto = "Mirada lateral / Giro de cabeza"
-                        color_contacto = "#eab308" # Amarillo
-                    alerta_expresion = "Expresión atenta"
-                else:
-                    alerta_contacto = "Rostro parcialmente cubierto"
-                    color_contacto = "#eab308"
-                    alerta_expresion = "Expresión no disponible"
-            else:
-                alerta_contacto = "Sin contacto visual"
-                color_contacto = "#9ca3af"
-                alerta_expresion = "Rostro no detectado"
-
-            # Emitir métricas completas actualizadas a la web
-            await websocket.send_json({
-                "movilidad": alerta_movilidad,
-                "gesticulacion": alerta_gestos,
-                "status_color": color_alerta,
-                "orientacion": alerta_orientacion,
-                "orientacion_color": color_orientacion,
-                "de_espaldas": es_de_espaldas,
-                "expresion": alerta_expresion,
-                "contacto_visual": alerta_contacto,
-                "contacto_visual_color": color_contacto
-            })
+            await websocket.send_json(metrics)
 
     except WebSocketDisconnect:
         print("[INFO] Cliente desconectado del WebSocket")
     except Exception as e:
         print(f"[ERROR] Error en WebSocket: {e}")
+    finally:
+        await persist_metrics()
 
 if __name__ == "__main__":
     import uvicorn
