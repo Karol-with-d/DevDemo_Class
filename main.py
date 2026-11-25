@@ -79,8 +79,12 @@ else:
     )
     try:
         if pose_model_path:
+            # MediaPipe opens the asset in C++ and fails on non-ASCII paths
+            # (this repo lives under "Maria Josè"). Passing the bytes works.
+            with open(pose_model_path, "rb") as pose_file:
+                pose_model_buffer = pose_file.read()
             pose_options = vision.PoseLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=pose_model_path),
+                base_options=BaseOptions(model_asset_buffer=pose_model_buffer),
                 running_mode=vision.RunningMode.IMAGE,
                 # 0.2 keeps the body when the teacher turns away. Only the
                 # back-facing warning confirms quickly; other signals stay slow.
@@ -91,8 +95,10 @@ else:
             pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
         face_model_path = os.path.join(script_dir, "face_landmarker.task")
         if os.path.exists(face_model_path):
+            with open(face_model_path, "rb") as face_file:
+                face_model_buffer = face_file.read()
             face_options = vision.FaceLandmarkerOptions(
-                base_options=BaseOptions(model_asset_path=face_model_path),
+                base_options=BaseOptions(model_asset_buffer=face_model_buffer),
                 running_mode=vision.RunningMode.IMAGE,
                 min_face_detection_confidence=0.3,
                 min_face_presence_confidence=0.3,

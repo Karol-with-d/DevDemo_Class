@@ -16,6 +16,11 @@ REQUIRED_ENV = (
     "AWS_BUCKET_NAME",
 )
 PRESIGN_EXPIRES = 3600
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def has_aws_settings():
+    return all(os.getenv(name) for name in REQUIRED_ENV)
 
 
 def _require_settings():
@@ -28,6 +33,17 @@ def _require_settings():
         "region": os.environ["AWS_REGION"],
         "bucket": os.environ["AWS_BUCKET_NAME"],
     }
+
+
+def _local_path_for_key(key):
+    key = str(key)
+    if not key.startswith("recordings/") or ".." in key.split("/"):
+        raise RuntimeError("Clave de video no válida.")
+    path = os.path.normpath(os.path.join(_REPO_ROOT, key))
+    root = os.path.normpath(os.path.join(_REPO_ROOT, "recordings"))
+    if not path.startswith(root + os.sep):
+        raise RuntimeError("Clave de video no válida.")
+    return path
 
 
 def _client(region):
@@ -45,12 +61,25 @@ def media_type_for(filename="", content_type=""):
 
 
 def upload_video_bytes(data, session_id, content_type="video/webm", filename="recording.webm"):
-    settings = _require_settings()
     session = safe_session_id(session_id)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     media_type = media_type_for(filename, content_type)
     ext = "mp4" if media_type == "video/mp4" else "webm"
     key = f"recordings/{session}/{stamp}.{ext}"
+
+    if not has_aws_settings():
+        local_path = _local_path_for_key(key)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "wb") as handle:
+            handle.write(data)
+        return {
+            "video_url": f"/video?key={key}",
+            "key": key,
+            "content_type": media_type,
+            "stored": "local",
+        }
+
+    settings = _require_settings()
     client = _client(settings["region"])
     try:
         client.put_object(
@@ -77,6 +106,15 @@ def upload_video_bytes(data, session_id, content_type="video/webm", filename="re
 
 
 def read_video_object(key):
+    # Videos grabados sin credenciales AWS quedan en disco con el mismo key.
+    # Servir el archivo local cuando exista aunque S3 ya esté configurado.
+    if not has_aws_settings() or os.path.isfile(_local_path_for_key(key)):
+        local_path = _local_path_for_key(key)
+        if not os.path.isfile(local_path):
+            raise RuntimeError("El video no existe en el almacenamiento local.")
+        with open(local_path, "rb") as handle:
+            return handle.read(), media_type_for(key)
+
     if not str(key).startswith("recordings/"):
         raise RuntimeError("Clave de video no válida.")
     settings = _require_settings()
@@ -91,6 +129,12 @@ def read_video_object(key):
 
 
 def delete_video_object(key):
+    local_path = _local_path_for_key(key)
+    if os.path.isfile(local_path):
+        os.remove(local_path)
+    if not has_aws_settings():
+        return
+
     if not str(key).startswith("recordings/"):
         raise RuntimeError("Clave de video no válida.")
     settings = _require_settings()
