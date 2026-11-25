@@ -35,7 +35,9 @@ from transcriber import (
     delete_local_session,
     list_saved_recordings,
     load_session_record,
+    replace_session_transcript,
     safe_session_id,
+    transcribe_recording_file,
     transcribe_speed_demo,
 )
 from s3_storage import (
@@ -50,6 +52,82 @@ from s3_storage import (
 
 # The latest socket for a recording wins. A replaced socket must not overwrite its subtitles.
 active_transcripts = {}
+# Post-recording full-audio transcription tasks keyed by session_id so reads await them.
+pending_transcriptions: dict[str, asyncio.Task] = {}
+
+
+async def await_pending_transcription(session_id: str) -> None:
+    task = pending_transcriptions.get(safe_session_id(session_id))
+    if task is None:
+        return
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        print(f"[WARN] Transcripción final pendiente ({session_id}): {exc}", flush=True)
+
+
+async def await_all_pending_transcriptions() -> None:
+    tasks = list(pending_transcriptions.values())
+    if not tasks:
+        return
+    await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+
+
+def _schedule_final_transcription(
+    session_id: str,
+    *,
+    audio_bytes: bytes | None,
+    audio_filename: str,
+    audio_content_type: str,
+    video_path=None,
+    video_bytes: bytes | None = None,
+    video_filename: str = "recording.webm",
+    video_content_type: str = "video/webm",
+    metadata: dict | None = None,
+    duration_seconds: float = 0.0,
+) -> asyncio.Task:
+    key = safe_session_id(session_id)
+    previous = pending_transcriptions.get(key)
+    if previous and not previous.done():
+        previous.cancel()
+
+    async def _run():
+        try:
+            existing = load_session_record(key) or {}
+            live_segments = existing.get("segments") or []
+            segments = await asyncio.to_thread(
+                transcribe_recording_file,
+                audio_bytes=audio_bytes,
+                audio_filename=audio_filename,
+                audio_content_type=audio_content_type,
+                video_path=video_path,
+                video_bytes=video_bytes,
+                video_filename=video_filename,
+                video_content_type=video_content_type,
+                technology=(metadata or {}).get("technology") or existing.get("technology") or "",
+                duration_seconds=duration_seconds,
+                live_segments=live_segments,
+            )
+            if segments or not live_segments:
+                await asyncio.to_thread(replace_session_transcript, key, segments, metadata=metadata)
+            else:
+                print(
+                    f"[WARN] Transcripción final vacía para {key}; se conserva la transcripción en vivo.",
+                    flush=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[ERROR] Transcripción final ({key}): {exc}", flush=True)
+        finally:
+            if pending_transcriptions.get(key) is task:
+                pending_transcriptions.pop(key, None)
+
+    task = asyncio.create_task(_run())
+    pending_transcriptions[key] = task
+    return task
 
 app = FastAPI()
 
@@ -132,11 +210,13 @@ def read_root():
 @app.post("/upload-video")
 async def upload_video(
     file: UploadFile = File(...),
+    audio: UploadFile | None = File(None),
     sessionId: str = Form(""),
     candidateName: str = Form(""),
     evaluatorName: str = Form(""),
     technology: str = Form(""),
     complexity: str = Form(""),
+    durationSeconds: float = Form(0.0),
 ):
     if not await file.read(1):
         raise HTTPException(status_code=400, detail="El archivo de video está vacío.")
@@ -144,55 +224,103 @@ async def upload_video(
     session_id = safe_session_id(sessionId)
     content_type = file.content_type or ""
     filename = file.filename or ""
-    source = "s3" if is_s3_configured() else "local"
-    if source == "s3":
-        try:
-            result = await asyncio.to_thread(
-                upload_video_bytes, await file.read(), session_id, content_type, filename,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except Exception as exc:
-            print(f"[ERROR] Subida a S3: {exc}")
-            raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
-    else:
-        try:
-            result = await asyncio.to_thread(
-                store_local_video, file.file, session_id, content_type, filename,
-            )
-        except (OSError, ValueError) as exc:
-            print(f"[ERROR] Guardando video local: {exc}")
-            raise HTTPException(status_code=500, detail="No se pudo guardar el video localmente.") from exc
+    metadata = {
+        "candidateName": candidateName or "Candidato",
+        "evaluatorName": evaluatorName,
+        "technology": technology,
+        "complexity": complexity,
+    }
 
-    previous_key = (load_session_record(session_id) or {}).get("videoKey")
+    audio_bytes = None
+    audio_filename = "audio.webm"
+    audio_content_type = "audio/webm"
+    if audio is not None:
+        raw_audio = await audio.read()
+        if raw_audio:
+            audio_bytes = raw_audio
+            audio_filename = audio.filename or "audio.webm"
+            audio_content_type = audio.content_type or "audio/webm"
+
+    transcription_task = None
+    if audio_bytes:
+        # Start full-audio transcription right away so it overlaps with S3/disk storage.
+        transcription_task = _schedule_final_transcription(
+            session_id,
+            audio_bytes=audio_bytes,
+            audio_filename=audio_filename,
+            audio_content_type=audio_content_type,
+            metadata=metadata,
+            duration_seconds=durationSeconds,
+        )
+
+    source = "s3" if is_s3_configured() else "local"
+    video_bytes = None
     try:
-        if source == "local" and not local_video_path(result["key"]).is_file():
-            raise FileNotFoundError("El video local ya no está disponible.")
-        attach_video_key(session_id, result["key"], metadata={
-            "candidateName": candidateName or "Candidato",
-            "evaluatorName": evaluatorName,
-            "technology": technology,
-            "complexity": complexity,
-        })
-    except (OSError, ValueError) as exc:
-        if source == "local":
+        if source == "s3":
+            video_bytes = await file.read()
             try:
-                local_video_path(result["key"]).unlink(missing_ok=True)
-            except (OSError, ValueError) as cleanup_error:
-                print(f"[WARN] No se pudo eliminar el video sin registrar: {cleanup_error}")
-        print(f"[ERROR] Actualizando el historial del video: {exc}")
-        raise HTTPException(status_code=500, detail="No se pudo registrar el video en el historial.") from exc
+                result = await asyncio.to_thread(
+                    upload_video_bytes, video_bytes, session_id, content_type, filename,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from exc
+            except Exception as exc:
+                print(f"[ERROR] Subida a S3: {exc}")
+                raise HTTPException(status_code=502, detail="No se pudo subir el video a S3.") from exc
+        else:
+            try:
+                result = await asyncio.to_thread(
+                    store_local_video, file.file, session_id, content_type, filename,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"[ERROR] Guardando video local: {exc}")
+                raise HTTPException(status_code=500, detail="No se pudo guardar el video localmente.") from exc
+
+        previous_key = (load_session_record(session_id) or {}).get("videoKey")
+        try:
+            if source == "local" and not local_video_path(result["key"]).is_file():
+                raise FileNotFoundError("El video local ya no está disponible.")
+            await asyncio.to_thread(attach_video_key, session_id, result["key"], metadata=metadata)
+        except (OSError, ValueError) as exc:
+            if source == "local":
+                try:
+                    local_video_path(result["key"]).unlink(missing_ok=True)
+                except (OSError, ValueError) as cleanup_error:
+                    print(f"[WARN] No se pudo eliminar el video sin registrar: {cleanup_error}")
+            print(f"[ERROR] Actualizando el historial del video: {exc}")
+            raise HTTPException(status_code=500, detail="No se pudo registrar el video en el historial.") from exc
+    except BaseException:
+        if transcription_task is not None and not transcription_task.done():
+            transcription_task.cancel()
+        raise
 
     if previous_key and previous_key.startswith(LOCAL_VIDEO_PREFIX):
         try:
             local_video_path(previous_key).unlink(missing_ok=True)
         except (OSError, ValueError) as exc:
             print(f"[WARN] No se pudo eliminar la versión anterior del video local: {exc}")
-    return {**result, "source": source, "savedInSystem": True}
+
+    if transcription_task is None:
+        transcription_task = _schedule_final_transcription(
+            session_id,
+            audio_bytes=None,
+            audio_filename=audio_filename,
+            audio_content_type=audio_content_type,
+            video_path=local_video_path(result["key"]) if source == "local" else None,
+            video_bytes=video_bytes if source == "s3" else None,
+            video_filename=filename or "recording.webm",
+            video_content_type=content_type or "video/webm",
+            metadata=metadata,
+            duration_seconds=durationSeconds,
+        )
+
+    transcript_status = "ready" if transcription_task.done() else "processing"
+    return {**result, "source": source, "savedInSystem": True, "transcriptStatus": transcript_status}
 
 
 @app.get("/recordings")
-def get_recordings():
+async def get_recordings():
+    await await_all_pending_transcriptions()
     return {"recordings": list_saved_recordings()}
 
 
@@ -228,6 +356,7 @@ async def save_evaluation(session_id: str, payload: dict):
 
 @app.get("/evaluations/{session_id}")
 async def get_evaluation(session_id: str):
+    await await_pending_transcription(session_id)
     record = load_session_record(session_id) or {}
     local_evaluation = record.get("evaluation")
     s3_evaluation = None
@@ -249,6 +378,7 @@ async def get_evaluation(session_id: str):
 
 @app.post("/evaluations/{session_id}/suggestions")
 async def get_rubric_suggestions(session_id: str):
+    await await_pending_transcription(session_id)
     record = load_session_record(session_id)
     if not record:
         return {"dimensions": []}
@@ -296,6 +426,13 @@ async def play_video(key: str, download: bool = False):
 
 @app.delete("/recordings/{session_id}")
 async def delete_recording(session_id: str):
+    pending_task = pending_transcriptions.pop(safe_session_id(session_id), None)
+    if pending_task is not None and not pending_task.done():
+        pending_task.cancel()
+        try:
+            await pending_task
+        except (asyncio.CancelledError, Exception):
+            pass
     record = load_session_record(session_id)
     if not record:
         raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")

@@ -424,7 +424,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     }
   };
 
-  if (loadState === "loading") return <p role="status">Cargando rúbrica…</p>;
+  if (loadState === "loading") return <p role="status">Cargando transcripción y rúbrica…</p>;
   if (loadState === "error") {
     return (
       <div className="space-y-2">

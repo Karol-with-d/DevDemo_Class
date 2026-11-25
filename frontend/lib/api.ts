@@ -105,7 +105,8 @@ export function playbackUrlForKey(key: string, download = false) {
 export async function uploadRecording(
   blob: Blob,
   session: Pick<SavedRecording, "sessionId" | "candidateName" | "evaluatorName" | "technology" | "complexity">,
-): Promise<{ playbackUrl: string; key: string | null; source?: VideoStorage }> {
+  options?: { audioBlob?: Blob | null; durationSeconds?: number },
+): Promise<{ playbackUrl: string; key: string | null; source?: VideoStorage; transcriptStatus?: string }> {
   const extension = blob.type.includes("mp4") ? "mp4" : "webm";
   const body = new FormData();
   body.append("sessionId", session.sessionId);
@@ -113,7 +114,18 @@ export async function uploadRecording(
   body.append("evaluatorName", session.evaluatorName);
   body.append("technology", session.technology);
   body.append("complexity", session.complexity);
+  if (options?.durationSeconds && Number.isFinite(options.durationSeconds) && options.durationSeconds > 0) {
+    body.append("durationSeconds", options.durationSeconds.toFixed(3));
+  }
   body.append("file", blob, `recording.${extension}`);
+  if (options?.audioBlob && options.audioBlob.size > 0) {
+    const audioExt = options.audioBlob.type.includes("mp4")
+      ? "mp4"
+      : options.audioBlob.type.includes("ogg")
+      ? "ogg"
+      : "webm";
+    body.append("audio", options.audioBlob, `audio.${audioExt}`);
+  }
 
   const response = await fetch(`${API_BASE}/upload-video`, {
     method: "POST",
@@ -124,14 +136,29 @@ export async function uploadRecording(
     throw new Error(await errorMessage(response, `No se pudo subir el video (${response.status})`));
   }
 
-  const payload = (await response.json()) as { video_url?: string; key?: string; source?: VideoStorage };
+  const payload = (await response.json()) as {
+    video_url?: string;
+    key?: string;
+    source?: VideoStorage;
+    transcriptStatus?: string;
+  };
   if (payload.key) {
-    return { playbackUrl: playbackUrlForKey(payload.key), key: payload.key, source: payload.source };
+    return {
+      playbackUrl: playbackUrlForKey(payload.key),
+      key: payload.key,
+      source: payload.source,
+      transcriptStatus: payload.transcriptStatus,
+    };
   }
   if (!payload.video_url) {
     throw new Error("El backend no devolvió video_url");
   }
-  return { playbackUrl: payload.video_url, key: null, source: payload.source };
+  return {
+    playbackUrl: payload.video_url,
+    key: null,
+    source: payload.source,
+    transcriptStatus: payload.transcriptStatus,
+  };
 }
 
 export async function listRecordings(): Promise<SavedRecording[]> {
