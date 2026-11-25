@@ -48,10 +48,20 @@ GAZE_AWAY_DEBOUNCE_SECONDS = 1.20  # brief glances at slides/notes are < 1.2s
 EYE_RECOVER_SECONDS = 0.25
 BLENDSHAPE_TAU_SECONDS = 0.15
 
-# Facial expression hysteresis (EMA smoothed)
+# Expression & incident tracking
 SMILE_TAU_SECONDS = 0.60
 SMILE_ENTER_THRESHOLD = 0.28
 SMILE_EXIT_THRESHOLD = 0.18
+INCIDENT_MIN_SECONDS = 2.0
+MAX_RECORDED_INCIDENTS = 12
+
+INCIDENT_LABELS = {
+    "espaldas": "De espaldas a la cámara",
+    "perfil": "De perfil (sin mirar a la cámara)",
+    "abajo": "Cabeza baja o fuera de cuadro",
+    "mirada_desviada": "Mirada desviada prolongada",
+    "ojos_cerrados": "Ojos cerrados prolongados",
+}
 
 
 def _ema(current: float | None, value: float, dt: float, tau: float) -> float:
@@ -216,6 +226,32 @@ class PoseSessionAnalyzer:
         self._smooth_smile: float | None = None
         self._smiling = False
 
+        # Session-wide time-weighted accumulators for post-session summary
+        self._session_start_ts: float | None = None
+        self._frames_analyzed = 0
+        self._duration_analyzed_sec = 0.0
+        self._person_detected_sec = 0.0
+
+        self._orient_sec = {"front": 0.0, "profile": 0.0, "back": 0.0, "down": 0.0}
+        self._eye_sec = {"direct": 0.0, "away": 0.0, "closed": 0.0, "turn": 0.0}
+        self._expr_sec = {"cordial": 0.0, "neutral": 0.0}
+
+        self._mobility_tracked_sec = 0.0
+        self._mobility_moving_sec = 0.0
+        self._last_mobility_moving: bool | None = None
+
+        self._gesture_pose_sec = 0.0
+        self._gesture_visible_sec = 0.0
+        self._gesture_moving_sec = 0.0
+        self._last_gesture_visible = False
+        self._last_gesture_moving = False
+
+        # Sustained incident tracker (kind -> start offset sec)
+        self._active_incident_kind: str | None = None
+        self._active_incident_start: float = 0.0
+        self._last_offset_sec: float = 0.0
+        self._incidents: list[dict] = []
+
     def _compute_dt(self, now: float) -> float:
         if self._last_ts is None:
             self._last_ts = now
@@ -256,6 +292,7 @@ class PoseSessionAnalyzer:
             if self._smooth_center is None or self._prev_center is None:
                 self._smooth_center = (center_x, center_y)
                 self._prev_center = (center_x, center_y)
+                self._last_mobility_moving = None
             else:
                 sx = _ema(self._smooth_center[0], center_x, dt, MOBILITY_TAU_SECONDS)
                 sy = _ema(self._smooth_center[1], center_y, dt, MOBILITY_TAU_SECONDS)
@@ -264,11 +301,19 @@ class PoseSessionAnalyzer:
                 if step_rel >= MOBILITY_JUMP_THRESHOLD:
                     self._smooth_center = (center_x, center_y)
                     self._prev_center = (center_x, center_y)
+                    self._last_mobility_moving = None
                 else:
                     self._smooth_center = (sx, sy)
                     self._prev_center = (sx, sy)
                     speed = step_rel / dt  # shoulder-widths per second
-                    self._mobility_samples.append((now, dt, speed >= MOBILITY_SPEED_THRESHOLD))
+                    is_moving = speed >= MOBILITY_SPEED_THRESHOLD
+                    self._last_mobility_moving = is_moving
+                    self._mobility_tracked_sec += dt
+                    if is_moving:
+                        self._mobility_moving_sec += dt
+                    self._mobility_samples.append((now, dt, is_moving))
+        else:
+            self._last_mobility_moving = None
 
         self._prune_window(self._mobility_samples, now, MOBILITY_WINDOW_SECONDS)
         total_dt = sum(item[1] for item in self._mobility_samples)
@@ -323,6 +368,14 @@ class PoseSessionAnalyzer:
 
         if any_moving:
             self._last_gesture_ts = now
+
+        self._last_gesture_visible = any_visible
+        self._last_gesture_moving = any_moving
+        self._gesture_pose_sec += dt
+        if any_visible:
+            self._gesture_visible_sec += dt
+        if any_moving:
+            self._gesture_moving_sec += dt
 
         self._gesture_samples.append((now, dt, any_visible, any_moving))
         self._prune_window(self._gesture_samples, now, GESTURE_WINDOW_SECONDS)
@@ -405,6 +458,168 @@ class PoseSessionAnalyzer:
         elif self._smiling and self._smooth_smile <= SMILE_EXIT_THRESHOLD:
             self._smiling = False
         return "Expresión cordial / Sonrisa" if self._smiling else "Expresión atenta / Neutral"
+
+    def _close_incident(self, end_sec: float) -> None:
+        if self._active_incident_kind is None:
+            return
+        duration = end_sec - self._active_incident_start
+        if duration >= INCIDENT_MIN_SECONDS and len(self._incidents) < MAX_RECORDED_INCIDENTS:
+            kind = self._active_incident_kind
+            self._incidents.append({
+                "type": kind,
+                "label": INCIDENT_LABELS.get(kind, kind),
+                "startSec": round(max(0.0, self._active_incident_start), 1),
+                "endSec": round(max(self._active_incident_start, end_sec), 1),
+                "durationSec": round(duration, 1),
+            })
+        self._active_incident_kind = None
+
+    def _update_incident(self, offset_sec: float, incident_kind: str | None) -> None:
+        if incident_kind == self._active_incident_kind:
+            return
+        self._close_incident(offset_sec)
+        if incident_kind is not None:
+            self._active_incident_kind = incident_kind
+            self._active_incident_start = offset_sec
+
+    def _record_session_sample(
+        self,
+        *,
+        ts: float,
+        dt: float,
+        pose_detected: bool,
+        face_detected: bool,
+        motivo_visible: str | None,
+        alerta_contacto: str,
+        alerta_expresion: str,
+    ) -> None:
+        if self._session_start_ts is None:
+            self._session_start_ts = ts
+        offset_sec = max(0.0, ts - self._session_start_ts)
+        self._last_offset_sec = offset_sec
+        self._frames_analyzed += 1
+        self._duration_analyzed_sec += dt
+
+        if not (pose_detected or face_detected):
+            self._update_incident(offset_sec, None)
+            return
+
+        self._person_detected_sec += dt
+
+        if motivo_visible == "espaldas":
+            self._orient_sec["back"] += dt
+        elif motivo_visible == "perfil":
+            self._orient_sec["profile"] += dt
+        elif motivo_visible == "abajo":
+            self._orient_sec["down"] += dt
+        else:
+            self._orient_sec["front"] += dt
+
+        if motivo_visible in ("espaldas", "perfil", "abajo"):
+            self._eye_sec["turn"] += dt
+        elif alerta_contacto == "Ojos cerrados":
+            self._eye_sec["closed"] += dt
+        elif alerta_contacto in ("Mirada desviada", "Mirada lateral / Giro de cabeza"):
+            self._eye_sec["away"] += dt
+        elif alerta_contacto == "Contacto visual directo":
+            self._eye_sec["direct"] += dt
+
+        if alerta_expresion == "Expresión cordial / Sonrisa":
+            self._expr_sec["cordial"] += dt
+        elif alerta_expresion in ("Expresión atenta / Neutral", "Expresión atenta"):
+            self._expr_sec["neutral"] += dt
+
+        incident_kind: str | None = None
+        if self._espalda_activa and motivo_visible in ("espaldas", "perfil", "abajo"):
+            incident_kind = motivo_visible
+        elif alerta_contacto == "Ojos cerrados":
+            incident_kind = "ojos_cerrados"
+        elif alerta_contacto == "Mirada desviada":
+            incident_kind = "mirada_desviada"
+        self._update_incident(offset_sec, incident_kind)
+
+    def summary(self) -> dict | None:
+        """Return aggregated, time-weighted session video metrics for storage & rubric."""
+        if self._frames_analyzed < 3 or self._duration_analyzed_sec < 1.0:
+            return None
+
+        # Snapshot any currently ongoing incident without mutating live tracking state.
+        incidents = list(self._incidents)
+        if self._active_incident_kind is not None and len(incidents) < MAX_RECORDED_INCIDENTS:
+            duration = self._last_offset_sec - self._active_incident_start
+            if duration >= INCIDENT_MIN_SECONDS:
+                kind = self._active_incident_kind
+                incidents.append({
+                    "type": kind,
+                    "label": INCIDENT_LABELS.get(kind, kind),
+                    "startSec": round(max(0.0, self._active_incident_start), 1),
+                    "endSec": round(max(self._active_incident_start, self._last_offset_sec), 1),
+                    "durationSec": round(duration, 1),
+                })
+
+        def pct(part: float, whole: float) -> float:
+            if whole <= 0:
+                return 0.0
+            return round(max(0.0, min(100.0, (part / whole) * 100.0)), 1)
+
+        orient_total = sum(self._orient_sec.values())
+        eye_total = sum(self._eye_sec.values())
+        expr_total = sum(self._expr_sec.values())
+
+        mobility_pct = pct(self._mobility_moving_sec, self._mobility_tracked_sec)
+        if self._mobility_tracked_sec < MOBILITY_MIN_SECONDS:
+            mobility_level = "Datos insuficientes"
+        elif mobility_pct > 35.0:
+            mobility_level = "Excelente dinamismo corporal"
+        elif mobility_pct > 12.0:
+            mobility_level = "Movilidad moderada"
+        else:
+            mobility_level = "Docente muy estático"
+
+        wrists_visible_pct = pct(self._gesture_visible_sec, self._gesture_pose_sec)
+        hands_mostly_out = self._gesture_pose_sec >= GESTURE_OUT_OF_FRAME_SECONDS and wrists_visible_pct < 20.0
+        gesture_active_pct = pct(self._gesture_moving_sec, self._gesture_visible_sec)
+        if hands_mostly_out:
+            gesture_level = "Manos fuera de cuadro"
+        elif self._gesture_visible_sec < 1.0:
+            gesture_level = "Datos insuficientes"
+        elif gesture_active_pct >= GESTURE_ACTIVE_RATIO * 100.0:
+            gesture_level = "Buen uso de gesticulación"
+        else:
+            gesture_level = "Gestos limitados (Manos estáticas)"
+
+        return {
+            "framesAnalyzed": self._frames_analyzed,
+            "durationAnalyzedSec": round(self._duration_analyzed_sec, 1),
+            "personDetectedPct": pct(self._person_detected_sec, self._duration_analyzed_sec),
+            "orientation": {
+                "facingCameraPct": pct(self._orient_sec["front"], orient_total),
+                "profilePct": pct(self._orient_sec["profile"], orient_total),
+                "backTurnedPct": pct(self._orient_sec["back"], orient_total),
+                "headDownPct": pct(self._orient_sec["down"], orient_total),
+            },
+            "eyeContact": {
+                "directPct": pct(self._eye_sec["direct"], eye_total),
+                "gazeAwayPct": pct(self._eye_sec["away"], eye_total),
+                "eyesClosedPct": pct(self._eye_sec["closed"], eye_total),
+                "lostDueToTurnPct": pct(self._eye_sec["turn"], eye_total),
+            },
+            "expression": {
+                "cordialPct": pct(self._expr_sec["cordial"], expr_total),
+                "neutralPct": pct(self._expr_sec["neutral"], expr_total),
+            },
+            "mobility": {
+                "activePct": mobility_pct,
+                "level": mobility_level,
+            },
+            "gestures": {
+                "visiblePct": wrists_visible_pct,
+                "activeWhenVisiblePct": gesture_active_pct,
+                "handsMostlyOutOfFrame": hands_mostly_out,
+                "level": gesture_level,
+            },
+            "incidents": incidents,
+        }
 
     def analyze(self, pose_result, face_result, w: int, h: int, now: float | None = None) -> dict:
         ts = time.perf_counter() if now is None else float(now)
@@ -570,6 +785,16 @@ class PoseSessionAnalyzer:
             alerta_contacto = "Sin contacto visual"
             color_contacto = "#9ca3af"
             alerta_expresion = "Rostro no detectado"
+
+        self._record_session_sample(
+            ts=ts,
+            dt=dt,
+            pose_detected=pose_detected,
+            face_detected=face_detected,
+            motivo_visible=motivo_visible,
+            alerta_contacto=alerta_contacto,
+            alerta_expresion=alerta_expresion,
+        )
 
         return {
             "movilidad": alerta_movilidad,

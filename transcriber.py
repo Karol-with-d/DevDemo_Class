@@ -512,7 +512,14 @@ class TranscriptSession:
                 "videoKey": self.video_key,
                 "savedInSystem": bool(self.video_key),
             }
-            for field in ("evaluation", "evaluationStorage", "evaluatedAt", "videoKey", "savedInSystem"):
+            for field in (
+                "evaluation",
+                "evaluationStorage",
+                "evaluatedAt",
+                "videoKey",
+                "savedInSystem",
+                "videoMetrics",
+            ):
                 if field in saved:
                     payload[field] = saved[field]
             _write_session_json(json_path, payload)
@@ -659,6 +666,31 @@ def attach_evaluation_report(session_id, evaluation_data, *, source):
         payload["evaluation"] = evaluation_data
         payload["evaluationStorage"] = source
         payload["evaluatedAt"] = evaluated_at
+        _write_session_json(path, payload)
+        return payload
+
+
+def attach_video_metrics(session_id, video_metrics, *, metadata=None):
+    """Persist aggregated MediaPipe video metrics on the session record."""
+    if not video_metrics or not isinstance(video_metrics, dict):
+        return None
+    session_id = safe_session_id(session_id)
+    directory = os.path.join(RECORDINGS_DIR, session_id)
+    os.makedirs(directory, exist_ok=True)
+    path = _session_json_path(session_id)
+    with _session_lock(session_id):
+        payload = load_session_record(session_id) or {
+            "sessionId": session_id,
+            "candidateName": "Candidato",
+            "evaluatorName": "",
+            "technology": "",
+            "complexity": "",
+            "segments": [],
+            **(metadata or {}),
+        }
+        payload["sessionId"] = session_id
+        payload["videoMetrics"] = video_metrics
+        payload["savedAt"] = payload.get("savedAt") or datetime.now().isoformat(timespec="seconds")
         _write_session_json(path, payload)
         return payload
 
@@ -1099,6 +1131,7 @@ def list_saved_recordings():
                 "segments": payload.get("segments") or [],
                 "vocabulary": payload.get("vocabulary") or [],
                 "muletillas": payload.get("muletillas") or {},
+                "videoMetrics": payload.get("videoMetrics"),
             }
         )
     items.sort(key=lambda item: item.get("savedAt") or "", reverse=True)

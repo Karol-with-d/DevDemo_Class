@@ -33,6 +33,7 @@ from transcriber import (
     TranscriptSession,
     attach_evaluation_report,
     attach_video_key,
+    attach_video_metrics,
     delete_local_session,
     list_saved_recordings,
     load_session_record,
@@ -374,6 +375,8 @@ async def get_evaluation(session_id: str):
         "evaluation": s3_evaluation if s3_evaluation is not None else local_evaluation,
         "segments": record.get("segments") or [],
         "vocabulary": record.get("vocabulary") or [],
+        "muletillas": record.get("muletillas") or {},
+        "videoMetrics": record.get("videoMetrics"),
     }
 
 
@@ -491,7 +494,9 @@ async def websocket_transcription(websocket: WebSocket):
 @app.websocket("/ws/pose-analysis")
 async def websocket_pose_analysis(websocket: WebSocket):
     await websocket.accept()
-    print("[INFO] Cliente conectado via WebSocket")
+    raw_session_id = (websocket.query_params.get("sessionId") or "").strip()
+    session_id = safe_session_id(raw_session_id) if raw_session_id else None
+    print(f"[INFO] Cliente conectado via WebSocket (pose session={session_id or 'anon'})")
 
     if cv2 is None or np is None:
         print("[WARN] Análisis de pose omitido: OpenCV/MediaPipe no disponible")
@@ -517,10 +522,47 @@ async def websocket_pose_analysis(websocket: WebSocket):
     analyzer = PoseSessionAnalyzer()
     pose_frames = 0
     pose_slow = 0
+    saved_frames = 0
+
+    async def persist_metrics() -> None:
+        nonlocal saved_frames
+        if not session_id or pose_frames <= saved_frames:
+            return
+        summary = analyzer.summary()
+        if not summary:
+            return
+        try:
+            await asyncio.to_thread(attach_video_metrics, session_id, summary)
+            saved_frames = pose_frames
+            print(
+                f"[INFO] Métricas de video guardadas ({session_id}): "
+                f"frames={summary['framesAnalyzed']} frente={summary['orientation']['facingCameraPct']}% "
+                f"contacto={summary['eyeContact']['directPct']}%",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[WARN] No se guardaron métricas de video ({session_id}): {exc}", flush=True)
 
     try:
         while True:
-            bytes_data = await websocket.receive_bytes()
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+
+            text = message.get("text")
+            if text:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") == "flush":
+                    await persist_metrics()
+                continue
+
+            bytes_data = message.get("bytes")
+            if not bytes_data:
+                continue
+
             frame_started = time.perf_counter()
 
             # Run JPEG decode + MediaPipe inference off the event loop so live audio
@@ -556,6 +598,8 @@ async def websocket_pose_analysis(websocket: WebSocket):
         print("[INFO] Cliente desconectado del WebSocket")
     except Exception as e:
         print(f"[ERROR] Error en WebSocket: {e}")
+    finally:
+        await persist_metrics()
 
 if __name__ == "__main__":
     import uvicorn

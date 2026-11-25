@@ -2,10 +2,20 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
-import { getEvaluation, getRubricSuggestions, saveEvaluation, type RubricSuggestion, type TechnicalTerm, type TranscriptSegment } from "../../lib/api";
+import {
+  getEvaluation,
+  getRubricSuggestions,
+  saveEvaluation,
+  type MuletillasSummary,
+  type RubricSuggestion,
+  type TechnicalTerm,
+  type TranscriptSegment,
+  type VideoMetrics,
+} from "../../lib/api";
 import rubric from "../../lib/univo-rubric.json";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
+import { VideoMetricsPanel } from "./VideoMetricsPanel";
 
 export type UnivoScale = "E" | "MB" | "B" | "R" | "NM";
 export type VerdictOption =
@@ -127,6 +137,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [vocabulary, setVocabulary] = useState<TechnicalTerm[]>([]);
+  const [muletillas, setMuletillas] = useState<MuletillasSummary | null>(null);
+  const [videoMetrics, setVideoMetrics] = useState<VideoMetrics | null>(null);
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [suggesting, setSuggesting] = useState(false);
@@ -166,6 +178,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
       setSegments(context.segments);
       setVocabulary(context.vocabulary);
+      setMuletillas(context.muletillas ?? null);
+      setVideoMetrics(context.videoMetrics ?? null);
       const saved = context.evaluation;
       if (saved) {
         const scores = Array.isArray(saved.rubricScores) ? saved.rubricScores : [];
@@ -195,7 +209,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       }
 
       setLoadState("ready");
-      if (!saved && autoSuggest && context.segments.some(({ text }) => text.trim())) {
+      const hasEvidence =
+        context.segments.some(({ text }) => text.trim()) || Boolean(context.videoMetrics);
+      if (!saved && autoSuggest && hasEvidence) {
         await requestSuggestions(signal);
       }
     }
@@ -227,6 +243,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   );
 
   const hasTranscript = segments.some(({ text }) => text.trim());
+  const hasAnalysisData = hasTranscript || Boolean(videoMetrics);
   const terms = vocabulary.map(({ term }) => term);
 
   const buildEvaluationPayload = () => ({
@@ -242,6 +259,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       scaleDistribution: metrics.counts,
       nlpTermsCount: terms.length,
     },
+    videoMetrics,
+    muletillas,
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
       ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback, evidence }) => ({
@@ -482,12 +501,14 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
+      <VideoMetricsPanel videoMetrics={videoMetrics} muletillas={muletillas} />
+
       <div className="space-y-2 text-sm text-slate-300">
         <p>Revisa las sugerencias y completa las dimensiones pendientes antes de usar el resultado.</p>
-        {!hasTranscript && <p>No hay una transcripción guardada. Puedes calificar la sesión manualmente.</p>}
-        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción…</p>}
+        {!hasAnalysisData && <p>No hay una transcripción ni métricas de video guardadas. Puedes calificar la sesión manualmente.</p>}
+        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción y el análisis de video…</p>}
         {suggestionError && <p role="alert" className="text-rose-400">{suggestionError}</p>}
-        {hasTranscript && !suggesting && !suggestionsLoaded && !savedPayload && (
+        {hasAnalysisData && !suggesting && !suggestionsLoaded && !savedPayload && (
           <button type="button" className="text-emerald-300 underline" onClick={() => void requestSuggestions()}>
             {suggestionError ? "Reintentar sugerencias" : "Generar sugerencias"}
           </button>

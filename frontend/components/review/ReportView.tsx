@@ -12,6 +12,7 @@
 import { SessionData } from "../session/SessionForm";
 import { TranscriptSaveResult } from "../recording/useLiveTranscript";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
+import { VideoMetricsPanel } from "../reports/VideoMetricsPanel";
 
 interface ReportViewProps {
   session: SessionData | null;
@@ -64,6 +65,12 @@ export function ReportView({ session, transcript }: ReportViewProps) {
           </div>
         ))}
       </div>
+
+      {/* Análisis de video y muletillas */}
+      <VideoMetricsPanel
+        videoMetrics={transcript?.videoMetrics}
+        muletillas={transcript?.muletillas}
+      />
 
       {/* Transcripción real con vocabulario resaltado (US08) */}
       <div className="rounded-2xl border border-[rgba(194,220,213,0.12)] bg-[#11191e] p-6 shadow-xl">
