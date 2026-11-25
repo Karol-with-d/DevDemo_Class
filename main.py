@@ -26,6 +26,7 @@ import os
 import time
 
 from live_caption import relay_live_transcription
+from rubric import suggest_rubric
 from transcriber import (
     TranscriptSession,
     attach_evaluation_report,
@@ -36,6 +37,7 @@ from transcriber import (
     transcribe_speed_demo,
 )
 from s3_storage import (
+    REQUIRED_ENV,
     delete_video_object,
     read_evaluation_json,
     read_video_object,
@@ -173,19 +175,39 @@ async def save_evaluation(session_id: str, payload: dict):
 
 @app.get("/evaluations/{session_id}")
 async def get_evaluation(session_id: str):
+    record = load_session_record(session_id) or {}
+    local_evaluation = record.get("evaluation")
+    s3_evaluation = None
+    if all(os.getenv(name) for name in REQUIRED_ENV):
+        try:
+            s3_evaluation = await asyncio.to_thread(read_evaluation_json, session_id)
+        except RuntimeError as exc:
+            if not local_evaluation:
+                raise HTTPException(status_code=503, detail="No se pudo consultar la evaluación guardada.") from exc
+
+    return {
+        "ok": True,
+        "source": "s3" if s3_evaluation is not None else "local" if local_evaluation else None,
+        "evaluation": s3_evaluation if s3_evaluation is not None else local_evaluation,
+        "segments": record.get("segments") or [],
+        "vocabulary": record.get("vocabulary") or [],
+    }
+
+
+@app.post("/evaluations/{session_id}/suggestions")
+async def get_rubric_suggestions(session_id: str):
+    record = load_session_record(session_id)
+    if not record:
+        return {"dimensions": []}
     try:
-        s3_eval = await asyncio.to_thread(read_evaluation_json, session_id)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-    if s3_eval is not None:
-        return {"ok": True, "source": "s3", "evaluation": s3_eval}
-
-    local_record = load_session_record(session_id)
-    if local_record and local_record.get("evaluation"):
-        return {"ok": True, "source": "local", "evaluation": local_record["evaluation"]}
-
-    return {"ok": True, "source": None, "evaluation": None}
+        dimensions = await asyncio.to_thread(suggest_rubric, record)
+    except Exception as exc:
+        print(f"[WARN] No se pudo generar la rúbrica: {type(exc).__name__}")
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudieron generar sugerencias. Puedes completar la rúbrica manualmente.",
+        ) from exc
+    return {"dimensions": dimensions}
 
 
 @app.get("/video")

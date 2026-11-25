@@ -38,6 +38,58 @@ export type SavedRecording = {
   vocabulary?: TechnicalTerm[];
 };
 
+export type RubricSuggestion = {
+  id: string;
+  score: number | null;
+  feedback: string;
+  evidence: string | null;
+};
+
+type EvaluationContext = {
+  evaluation: {
+    rubricScores?: {
+      id: string;
+      aiScore?: number | null;
+      finalScore?: number | null;
+      scale?: "E" | "MB" | "B" | "R" | "NM" | null;
+      feedback?: string;
+      evidence?: string | null;
+    }[];
+    overallVerdict?: string | null;
+    qualitativeObservations?: string;
+  } | null;
+  segments: TranscriptSegment[];
+  vocabulary: TechnicalTerm[];
+};
+
+export async function getEvaluation(sessionId: string, signal?: AbortSignal): Promise<EvaluationContext> {
+  const response = await fetch(`${API_BASE}/evaluations/${encodeURIComponent(sessionId)}`, { signal });
+  if (!response.ok) throw new Error(await errorMessage(response, "No se pudo cargar la evaluación."));
+  return response.json();
+}
+
+export async function getRubricSuggestions(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<{ dimensions: RubricSuggestion[] }> {
+  const response = await fetch(`${API_BASE}/evaluations/${encodeURIComponent(sessionId)}/suggestions`, {
+    method: "POST",
+    signal,
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "No se pudieron generar sugerencias."));
+  return response.json();
+}
+
+export async function saveEvaluation(sessionId: string, payload: object): Promise<{ key: string }> {
+  const response = await fetch(`${API_BASE}/evaluations/${encodeURIComponent(sessionId)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw new Error(await errorMessage(response, "No se pudo guardar la evaluación."));
+  return response.json();
+}
+
 export function playbackUrlForKey(key: string, download = false) {
   const params = new URLSearchParams({ key });
   if (download) params.set("download", "true");

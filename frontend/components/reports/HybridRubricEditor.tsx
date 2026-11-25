@@ -5,7 +5,7 @@ import React from 'react';
 export interface RubricIndicator {
   id: string;
   label: string;
-  aiScore: number;
+  aiScore: number | null;
   adjustedScore: number;
   feedback: string;
 }
@@ -49,7 +49,7 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
       <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
         <div>
           <h3 className="text-lg font-semibold text-emerald-400">Rúbrica Evaluativa Híbrida (IA + Ajuste Manual)</h3>
-          <p className="text-xs text-slate-400">Valores autocompletados por IA. Deslice o edite el valor numérico para calibrar la nota final.</p>
+          <p className="text-xs text-slate-400">Deslice o edite el valor numérico para ajustar la nota de cada dimensión calificada.</p>
         </div>
 
         <div className="flex items-center gap-3">
@@ -77,7 +77,7 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
                   <span className="font-semibold text-slate-100">{item.label}</span>
                   {isModified && (
                     <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
-                      Editado (IA: {item.aiScore}%)
+                    {item.aiScore === null ? "Manual" : `Editado (IA: ${item.aiScore}%)`}
                     </span>
                   )}
                 </div>

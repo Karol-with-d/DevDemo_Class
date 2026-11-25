@@ -166,7 +166,7 @@ export default function Page() {
           </div>
         )}
 
-        {step === "evaluation" && (
+        {step === "evaluation" && sessionData && (
           <div className="w-full max-w-5xl pt-6">
             <div className="mb-4 flex justify-end">
               <button
@@ -178,11 +178,12 @@ export default function Page() {
               </button>
             </div>
             <ConsolidatedReportView
-              sessionId={sessionData?.sessionId || "SES-DEMO-01"}
-              candidateName={sessionData?.candidateName || "Candidato"}
-              evaluatorName={sessionData?.evaluatorName || ""}
-              technology={sessionData?.technology || ""}
-              complexity={sessionData?.complexity || ""}
+              sessionId={sessionData.sessionId}
+              candidateName={sessionData.candidateName}
+              evaluatorName={sessionData.evaluatorName}
+              technology={sessionData.technology}
+              complexity={sessionData.complexity}
+              autoSuggest
             />
           </div>
         )}
