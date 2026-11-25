@@ -118,7 +118,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const [verdict, setVerdict] = useState<VerdictOption | null>(null);
   const [qualitativeNotes, setQualitativeNotes] = useState("");
   const [savedPayload, setSavedPayload] = useState<string | null>(null);
-  const [s3Key, setS3Key] = useState<string | null>(null);
+  const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [showAdvancedViews, setShowAdvancedViews] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
@@ -191,6 +191,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           setQualitativeNotes(saved.qualitativeObservations);
         }
         setSavedPayload(JSON.stringify(saved, null, 2));
+        setSavedLocation(context.source === "s3" ? "en AWS S3" : "en este equipo");
         setSuggestionsLoaded(true);
       }
 
@@ -403,12 +404,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     try {
       const result = await saveEvaluation(sessionId, jsonPayload);
 
+      const location = result.source === "s3" ? "en AWS S3" : "en este equipo";
       setSavedPayload(JSON.stringify(jsonPayload, null, 2));
       setSuggestionsLoaded(true);
-      setS3Key(result.key || `recordings/${sessionId}/evaluation.json`);
+      setSavedLocation(location);
       setStatusMessage({
         type: "success",
-        text: `Guardado en AWS S3 (${result.key || "evaluation.json"})`,
+        text: `Evaluación guardada ${location}.`,
       });
     } catch (err) {
       const message =
@@ -581,7 +583,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       )}
 
-      {/* Dictamen rápido + Chips + Observaciones y Guardado en S3 */}
+      {/* Dictamen, observaciones y guardado */}
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
         <div>
           <h3 className="text-base font-semibold text-emerald-400">
@@ -647,7 +649,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               disabled={isSaving || suggesting}
               className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
             >
-              {isSaving ? "Guardando en S3..." : "Guardar Evaluación Consolidada"}
+              {isSaving ? "Guardando evaluación..." : "Guardar Evaluación Consolidada"}
             </button>
 
             <button
@@ -679,7 +681,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         {savedPayload && (
           <div className="mt-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
             <p className="text-xs text-slate-400 mb-2 font-mono">
-              JSON persistido {s3Key ? `en S3 (${s3Key})` : ""}:
+              Evaluación guardada {savedLocation}
             </p>
             <pre className="text-xs text-emerald-300 overflow-x-auto">{savedPayload}</pre>
           </div>

@@ -37,8 +37,8 @@ from transcriber import (
     transcribe_speed_demo,
 )
 from s3_storage import (
-    REQUIRED_ENV,
     delete_video_object,
+    is_s3_configured,
     read_evaluation_json,
     read_video_object,
     upload_evaluation_json,
@@ -161,16 +161,30 @@ def get_recordings():
 async def save_evaluation(session_id: str, payload: dict):
     if not payload:
         raise HTTPException(status_code=400, detail="Los datos de evaluación están vacíos.")
-    try:
-        s3_res = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        print(f"[ERROR] Guardando evaluación en S3: {exc}")
-        raise HTTPException(status_code=502, detail="No se pudo guardar la evaluación en S3.") from exc
 
-    attach_evaluation_report(session_id, payload)
-    return {"ok": True, "sessionId": session_id, **s3_res}
+    source = "local"
+    result = {"key": None, "savedInS3": False}
+    if is_s3_configured():
+        try:
+            result = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
+            source = "s3"
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            print(f"[ERROR] Guardando evaluación en S3: {exc}")
+            raise HTTPException(status_code=502, detail="No se pudo guardar la evaluación en S3.") from exc
+
+    try:
+        attach_evaluation_report(session_id, payload, source=source)
+    except OSError as exc:
+        print(f"[ERROR] Guardando evaluación local: {exc}")
+        detail = (
+            "Se guardó en AWS S3, pero no se pudo actualizar el historial local."
+            if source == "s3"
+            else "No se pudo guardar la evaluación localmente."
+        )
+        raise HTTPException(status_code=500, detail=detail) from exc
+    return {"ok": True, "sessionId": session_id, "source": source, **result}
 
 
 @app.get("/evaluations/{session_id}")
@@ -178,7 +192,7 @@ async def get_evaluation(session_id: str):
     record = load_session_record(session_id) or {}
     local_evaluation = record.get("evaluation")
     s3_evaluation = None
-    if all(os.getenv(name) for name in REQUIRED_ENV):
+    if is_s3_configured() and record.get("evaluationStorage") != "local":
         try:
             s3_evaluation = await asyncio.to_thread(read_evaluation_json, session_id)
         except RuntimeError as exc:

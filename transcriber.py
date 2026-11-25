@@ -4,6 +4,7 @@ import os
 import queue
 import re
 import shutil
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -475,8 +476,11 @@ class TranscriptSession:
         json_path = os.path.join(self.directory, "transcript.json")
         vtt_path = os.path.join(self.directory, "transcript.vtt")
         txt_path = os.path.join(self.directory, "transcript.txt")
-        with open(json_path, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        saved = load_session_record(self.session_id) or {}
+        for field in ("evaluation", "evaluationStorage", "evaluatedAt"):
+            if field in saved:
+                payload[field] = saved[field]
+        _write_session_json(json_path, payload)
         with open(vtt_path, "w", encoding="utf-8") as handle:
             handle.write(self.to_vtt())
         with open(txt_path, "w", encoding="utf-8") as handle:
@@ -552,6 +556,21 @@ def _session_json_path(session_id):
     return os.path.join(RECORDINGS_DIR, safe_session_id(session_id), "transcript.json")
 
 
+def _write_session_json(path, payload):
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=os.path.dirname(path), delete=False,
+        ) as handle:
+            temporary_path = handle.name
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            os.unlink(temporary_path)
+
+
 def load_session_record(session_id):
     path = _session_json_path(session_id)
     if not os.path.isfile(path):
@@ -581,12 +600,11 @@ def attach_video_key(session_id, video_key):
     payload["videoKey"] = video_key
     payload["savedInSystem"] = True
     payload["savedAt"] = payload.get("savedAt") or datetime.now().isoformat(timespec="seconds")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    _write_session_json(path, payload)
     return payload
 
 
-def attach_evaluation_report(session_id, evaluation_data):
+def attach_evaluation_report(session_id, evaluation_data, *, source):
     session_id = safe_session_id(session_id)
     directory = os.path.join(RECORDINGS_DIR, session_id)
     os.makedirs(directory, exist_ok=True)
@@ -599,10 +617,12 @@ def attach_evaluation_report(session_id, evaluation_data):
         "complexity": evaluation_data.get("complexity", ""),
         "segments": [],
     }
+    evaluated_at = datetime.now().isoformat(timespec="seconds")
+    payload.setdefault("savedAt", evaluated_at)
     payload["evaluation"] = evaluation_data
-    payload["evaluatedAt"] = evaluation_data.get("savedAt") or datetime.now().isoformat(timespec="seconds")
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2)
+    payload["evaluationStorage"] = source
+    payload["evaluatedAt"] = evaluated_at
+    _write_session_json(path, payload)
     return payload
 
 

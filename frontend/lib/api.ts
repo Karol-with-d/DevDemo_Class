@@ -46,6 +46,7 @@ export type RubricSuggestion = {
 };
 
 type EvaluationContext = {
+  source: "s3" | "local" | null;
   evaluation: {
     rubricScores?: {
       id: string;
@@ -80,7 +81,10 @@ export async function getRubricSuggestions(
   return response.json();
 }
 
-export async function saveEvaluation(sessionId: string, payload: object): Promise<{ key: string }> {
+export async function saveEvaluation(
+  sessionId: string,
+  payload: object,
+): Promise<{ key: string | null; source: "s3" | "local" }> {
   const response = await fetch(`${API_BASE}/evaluations/${encodeURIComponent(sessionId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
