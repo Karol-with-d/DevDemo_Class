@@ -177,6 +177,7 @@ export function SplitRecordingInterface({
 
       <CameraComponent
         stream={stream}
+        sessionId={session.sessionId}
         embedded
         caption={live.caption}
         previousCaption={live.previousCaption}

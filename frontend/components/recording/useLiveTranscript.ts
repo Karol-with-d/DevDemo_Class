@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { VideoStorage } from "../../lib/api";
+import type { MuletillasSummary, VideoMetrics, VideoStorage } from "../../lib/api";
 import type { SessionData } from "../session/SessionForm";
 
 export interface TranscriptSegment {
@@ -26,6 +26,8 @@ export interface TranscriptSaveResult {
   videoKey?: string | null;
   videoStorage?: VideoStorage;
   vocabulary?: TechnicalTerm[];
+  muletillas?: MuletillasSummary;
+  videoMetrics?: VideoMetrics | null;
 }
 
 export type CaptionStatus = "connecting" | "live" | "saving" | "error";

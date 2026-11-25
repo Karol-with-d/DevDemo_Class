@@ -130,19 +130,34 @@ _GENERIC_TERMS = {
     "backend": ("backend", "back end"),
 }
 
-# Folded regex pattern -> canonical display label
+# Folded regex pattern -> canonical display label (multi-word phrases first so
+# e.g. "la verdad" does not double-count as "verdad").
 _MULETILLA_PATTERNS = (
     (r"\bo sea\b", "o sea"),
     (r"\bla verdad\b", "la verdad"),
     (r"\bes que\b", "es que"),
+    (r"\bcomo que\b", "como que"),
+    (r"\b(?:ahm+|am+)\b", "ahm"),
+    (r"\b(?:emm+|em+|um+|uhm+)\b", "emm"),
     (r"\beh+\b", "eh"),
+    (r"\buh+\b", "uh"),
+    (r"\bah+\b", "ah"),
+    (r"\bmm+\b", "mmm"),
+    (r"\b(?:aja+|aha+)\b", "ajá"),
     (r"\beste+\b", "este"),
     (r"\bpues\b", "pues"),
     (r"\bbueno\b", "bueno"),
     (r"\bverdad\b", "verdad"),
     (r"\bdigamos\b", "digamos"),
     (r"\bbasicamente\b", "básicamente"),
-    (r"\bmmm+\b", "mmm"),
+    (r"\bentonces\b", "entonces"),
+    (r"\bvale\b", "vale"),
+    (r"\b(?:ok|okey|okay)\b", "ok"),
+)
+
+_MULETILLA_GROUP_LABELS = [label for _, label in _MULETILLA_PATTERNS]
+_MULETILLA_COMBINED_RE = re.compile(
+    "|".join(f"(?P<m{i}>{pattern})" for i, (pattern, _) in enumerate(_MULETILLA_PATTERNS))
 )
 
 
@@ -267,10 +282,11 @@ def extract_muletillas(text: str) -> dict:
     folded_text = _fold(spoken)
     counts = Counter()
 
-    for pattern, label in _MULETILLA_PATTERNS:
-        matches = re.findall(pattern, folded_text)
-        if matches:
-            counts[label] += len(matches)
+    for match in _MULETILLA_COMBINED_RE.finditer(folded_text):
+        group_name = match.lastgroup
+        if group_name is not None:
+            label = _MULETILLA_GROUP_LABELS[int(group_name[1:])]
+            counts[label] += 1
 
     total_words = len(re.findall(r"\b\w+\b", folded_text))
     total_muletillas = sum(counts.values())
