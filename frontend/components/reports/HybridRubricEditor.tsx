@@ -5,7 +5,7 @@ import React from "react";
 export interface RubricIndicator {
   id: string;
   label: string;
-  aiScore: number;
+  aiScore: number | null;
   adjustedScore: number;
   feedback: string;
 }
@@ -55,7 +55,7 @@ export const HybridRubricEditor: React.FC<Props> = ({ indicators, onScoreChange 
                   <span className="font-semibold text-slate-100">{item.label}</span>
                   {isModified && (
                     <span className="text-[10px] bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded border border-amber-500/30">
-                      Editado (IA: {item.aiScore}%)
+                    {item.aiScore === null ? "Manual" : `Editado (IA: ${item.aiScore}%)`}
                     </span>
                   )}
                 </div>

@@ -1,0 +1,26 @@
+[
+  {
+    "id": "innovacion_actualizacion",
+    "title": "Innovación y Actualización",
+    "univoScope": "Ítems 1–6 · Puntualidad, competencia, pre-saberes, dicción, recursos y PNL",
+    "observable": "Activación de conocimientos previos, claridad del vocabulario y explicación del uso de recursos."
+  },
+  {
+    "id": "calidad_ensenanza",
+    "title": "Calidad de la Enseñanza",
+    "univoScope": "Ítems 7–14 · Plan de clase, distribución del tiempo, dominio y estrategias",
+    "observable": "Secuencia explícita de la explicación, dominio del tema y estrategias de enseñanza descritas o demostradas."
+  },
+  {
+    "id": "relacion_estudiantes",
+    "title": "Relación con los Estudiantes",
+    "univoScope": "Ítems 15–20 · Respeto, conducción, ejemplos, interés y consultas",
+    "observable": "Ejemplos vinculados con la experiencia estudiantil, invitaciones a participar y respuestas a preguntas que se oyen."
+  },
+  {
+    "id": "evaluacion_retroalimentacion",
+    "title": "Evaluación y Retroalimentación",
+    "univoScope": "Ítems 21–26 · Seguimiento, comprensión, retroalimentación y cierre",
+    "observable": "Comprobaciones explícitas de comprensión, devoluciones sobre respuestas y síntesis verbal de cierre."
+  }
+]

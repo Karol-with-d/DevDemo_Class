@@ -47,7 +47,7 @@ export function RecordingsLibrary({ onBack }: RecordingsLibraryProps) {
   };
 
   const handleDelete = async (recording: SavedRecording) => {
-    if (!window.confirm(`¿Eliminar la grabación de ${recording.candidateName}? Se borra del sistema y de S3.`)) {
+    if (!window.confirm(`¿Eliminar la grabación de ${recording.candidateName}?`)) {
       return;
     }
     setBusy(true);
@@ -70,7 +70,7 @@ export function RecordingsLibrary({ onBack }: RecordingsLibraryProps) {
           <span className="eyebrow">Biblioteca</span>
           <h2 className="text-2xl font-bold">Grabaciones guardadas</h2>
           <p className="mt-1 text-sm text-[#82918f]">
-            Videos que quedaron en el sistema. Puedes reproducirlos, bajarlos al dispositivo o eliminarlos sin entrar a AWS.
+            Puedes reproducir los videos, descargarlos o eliminarlos.
           </p>
         </div>
         <button
@@ -124,7 +124,7 @@ export function RecordingsLibrary({ onBack }: RecordingsLibraryProps) {
                   playsInline
                 />
               ) : (
-                <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video en S3.</p>
+                <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video guardado.</p>
               )}
               <TechnicalTranscript
                 segments={selected.segments ?? []}

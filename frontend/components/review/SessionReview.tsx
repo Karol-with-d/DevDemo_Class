@@ -3,9 +3,7 @@
 // ============================================================================
 // US11 — Navegación fluida entre vistas (Épica 5: Galería y Gestión de Grabaciones)
 //
-// Contenedor de la "Auditoría de Sesión": barra superior con 3 pestañas
-// (Reporte / Rúbrica / Grabaciones) que conmutan INSTANTÁNEAMENTE vía useState,
-// sin recargar la página ni usar el router de Next.js.
+// Contenedor de la "Auditoría de Sesión": pestañas de reporte, rúbrica y grabaciones.
 //
 // Dos modos de entrada:
 //  - Post-grabación (props session + transcript): muestra los datos reales de
@@ -20,7 +18,7 @@ import { SessionData } from "../session/SessionForm";
 import { TranscriptSaveResult } from "../recording/useLiveTranscript";
 import { SavedRecording, deleteRecording, playbackUrlForKey } from "../../lib/api";
 import { ReportView } from "./ReportView";
-import { RubricView } from "./RubricView";
+import { ConsolidatedReportView } from "../reports/ConsolidatedReportView";
 import { GalleryView } from "./GalleryView";
 
 // Identificadores internos de cada pestaña.
@@ -124,10 +122,6 @@ export function SessionReview({ session, transcript, recordings, onBack, onNewSe
                 {effectiveSession?.complexity} · Evaluador: {effectiveSession?.evaluatorName || "—"}
               </span>
             </div>
-            {/* Aviso temporal: quitar cuando se integre la rúbrica real de US10 */}
-            <p className="mt-2 text-[10px] text-[#5b6b68]">
-              * La rúbrica muestra criterios de muestra, pendiente de integración con US10.
-            </p>
           </div>
           <div className="flex flex-wrap gap-2">
             {onBack && (
@@ -173,8 +167,6 @@ export function SessionReview({ session, transcript, recordings, onBack, onNewSe
           </div>
         )}
 
-        {/* Menú de navegación. Cada botón actualiza `activeTab` — el cambio de
-            vista es inmediato porque todo vive en el cliente (sin fetch ni reload). */}
         <nav
           role="tablist"
           aria-label="Vistas de auditoría"
@@ -209,7 +201,7 @@ export function SessionReview({ session, transcript, recordings, onBack, onNewSe
           .tab-panel (definida en globals.css) en cada cambio de pestaña o sesión. */}
       <div key={`${activeTab}-${selected?.sessionId ?? "current"}`} className="tab-panel">
         {activeTab === "report" && <ReportView session={effectiveSession} transcript={effectiveTranscript} />}
-        {activeTab === "rubric" && <RubricView session={effectiveSession} />}
+        {activeTab === "rubric" && effectiveSession && <ConsolidatedReportView {...effectiveSession} />}
         {activeTab === "gallery" &&
           (isHistoryMode ? (
             <GalleryView
