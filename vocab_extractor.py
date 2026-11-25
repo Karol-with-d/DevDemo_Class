@@ -1,4 +1,4 @@
-"""Technical vocabulary from a Whisper transcript (spaCy + domain glossaries).
+"""Technical vocabulary and filler words (muletillas) from a Whisper transcript.
 
 Spanish NER rarely tags framework names, so tokens are classified against
 Python/JS glossaries after spaCy lemmatizes the text. Missing spaCy or the
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections import Counter
 
 _nlp = None
 _nlp_failed = False
@@ -129,6 +130,21 @@ _GENERIC_TERMS = {
     "backend": ("backend", "back end"),
 }
 
+# Folded regex pattern -> canonical display label
+_MULETILLA_PATTERNS = (
+    (r"\bo sea\b", "o sea"),
+    (r"\bla verdad\b", "la verdad"),
+    (r"\bes que\b", "es que"),
+    (r"\beh+\b", "eh"),
+    (r"\beste+\b", "este"),
+    (r"\bpues\b", "pues"),
+    (r"\bbueno\b", "bueno"),
+    (r"\bverdad\b", "verdad"),
+    (r"\bdigamos\b", "digamos"),
+    (r"\bbasicamente\b", "básicamente"),
+    (r"\bmmm+\b", "mmm"),
+)
+
 
 def _fold(text: str) -> str:
     nfkd = unicodedata.normalize("NFKD", text or "")
@@ -234,3 +250,36 @@ def extract_technical_terms(text: str, technology: str = ""):
             }
 
     return sorted(hits.values(), key=lambda item: item["term"])
+
+
+def extract_muletillas(text: str) -> dict:
+    """Count Spanish filler words (muletillas) in a verbatim transcript."""
+    spoken = " ".join((text or "").split())
+    if not spoken:
+        return {
+            "total": 0,
+            "totalWords": 0,
+            "ratioPct": 0.0,
+            "breakdown": {},
+            "items": [],
+        }
+
+    folded_text = _fold(spoken)
+    counts = Counter()
+
+    for pattern, label in _MULETILLA_PATTERNS:
+        matches = re.findall(pattern, folded_text)
+        if matches:
+            counts[label] += len(matches)
+
+    total_words = len(re.findall(r"\b\w+\b", folded_text))
+    total_muletillas = sum(counts.values())
+    ratio_pct = round((total_muletillas / total_words) * 100, 2) if total_words else 0.0
+
+    return {
+        "total": total_muletillas,
+        "totalWords": total_words,
+        "ratioPct": ratio_pct,
+        "breakdown": dict(counts.most_common()),
+        "items": [{"phrase": phrase, "count": count} for phrase, count in counts.most_common()],
+    }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { VideoStorage } from "../../lib/api";
 import type { SessionData } from "../session/SessionForm";
 
 export interface TranscriptSegment {
@@ -23,6 +24,7 @@ export interface TranscriptSaveResult {
   docxPath: string | null;
   videoUrl?: string | null;
   videoKey?: string | null;
+  videoStorage?: VideoStorage;
   vocabulary?: TechnicalTerm[];
 }
 
@@ -32,7 +34,8 @@ const TARGET_RATE = 24000;
 const SILENCE_RMS = 0.012;
 const PAUSE_SECONDS = 0.5;
 const MIN_UTTERANCE_SECONDS = 0.6;
-const MAX_UTTERANCE_SECONDS = 3;
+const MAX_UTTERANCE_SECONDS = 8;
+const PRE_ROLL_SECONDS = 0.3;
 const SEND_SECONDS = 0.1;
 
 interface Engine {
@@ -41,6 +44,8 @@ interface Engine {
   processor: ScriptProcessorNode | null;
   gain: GainNode | null;
   source: MediaStreamAudioSourceNode | null;
+  preRollChunks: Float32Array[];
+  preRollSamples: number;
   turnChunks: Float32Array[];
   pendingSamples: number;
   turnSamples: number;
@@ -176,6 +181,8 @@ export function useLiveTranscript(
       processor: null,
       gain: null,
       source: null,
+      preRollChunks: [],
+      preRollSamples: 0,
       turnChunks: [],
       pendingSamples: 0,
       turnSamples: 0,
@@ -373,8 +380,25 @@ export function useLiveTranscript(
       if (block.length === 0) return;
       const loud = rms(block) > SILENCE_RMS;
       if (engine.turnStart === null) {
-        if (!loud) return;
-        engine.turnStart = elapsedSeconds(engine);
+        if (!loud) {
+          engine.preRollChunks.push(block);
+          engine.preRollSamples += block.length;
+          const maxPreRoll = TARGET_RATE * PRE_ROLL_SECONDS;
+          while (engine.preRollSamples > maxPreRoll && engine.preRollChunks.length > 1) {
+            const dropped = engine.preRollChunks.shift();
+            if (dropped) engine.preRollSamples -= dropped.length;
+          }
+          return;
+        }
+        const preRollDuration = engine.preRollSamples / TARGET_RATE;
+        engine.turnStart = Math.max(0, elapsedSeconds(engine) - preRollDuration);
+        if (engine.preRollSamples > 0) {
+          engine.turnChunks.push(...engine.preRollChunks);
+          engine.pendingSamples += engine.preRollSamples;
+          engine.turnSamples += engine.preRollSamples;
+          engine.preRollChunks = [];
+          engine.preRollSamples = 0;
+        }
       }
       engine.turnChunks.push(block);
       engine.pendingSamples += block.length;
@@ -425,6 +449,7 @@ export function useLiveTranscript(
 
     if (engine.turnSamples > 0 || engine.pendingSamples > 0) {
       const samples = mergeSamples(engine.turnChunks, engine.pendingSamples);
+      const committedSamples = engine.turnSamples;
       const start = engine.turnStart ?? elapsedSeconds(engine);
       const end = elapsedSeconds(engine);
       engine.turnChunks = [];
@@ -432,7 +457,7 @@ export function useLiveTranscript(
       engine.turnSamples = 0;
       engine.turnSilence = 0;
       engine.turnStart = null;
-      if (samples.length >= TARGET_RATE * 0.3 && rms(samples) >= SILENCE_RMS) {
+      if (committedSamples >= TARGET_RATE * 0.3) {
         engine.pending += 1;
         engine.loggedPartial = false;
         console.info(`[TIME live] commit audio=${(end - start).toFixed(2)}s span=final`);
@@ -441,9 +466,14 @@ export function useLiveTranscript(
           const socket = engine.ws;
           if (!socket || socket.readyState !== WebSocket.OPEN) {
             engine.pending = Math.max(0, engine.pending - 1);
+            if (engine.pending === 0) {
+              engine.drain.splice(0).forEach((resolve) => resolve());
+            }
             return;
           }
-          socket.send(JSON.stringify({ type: "audio", pcm: pcm16Base64(samples) }));
+          if (samples.length > 0) {
+            socket.send(JSON.stringify({ type: "audio", pcm: pcm16Base64(samples) }));
+          }
           socket.send(JSON.stringify({ type: "commit", start, end }));
           engine.sentAt.push(performance.now());
         });

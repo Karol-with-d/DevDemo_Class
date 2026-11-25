@@ -19,6 +19,10 @@ REQUIRED_ENV = (
 PRESIGN_EXPIRES = 3600
 
 
+def is_s3_configured():
+    return all(os.getenv(name) for name in REQUIRED_ENV)
+
+
 def _require_settings():
     missing = [name for name in REQUIRED_ENV if not os.getenv(name)]
     if missing:

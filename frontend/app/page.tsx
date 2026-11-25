@@ -4,14 +4,18 @@ import { useEffect, useRef, useState } from "react";
 import { DeviceCalibration } from "../components/calibration/DeviceCalibration";
 import { RotatePhonePrompt } from "../components/calibration/RotatePhonePrompt";
 import { SplitRecordingInterface } from "../components/recording/SplitRecordingInterface";
-import { RecordingsLibrary } from "../components/recordings/RecordingsLibrary";
+import type { TranscriptSaveResult } from "../components/recording/useLiveTranscript";
 import { ConsolidatedReportView } from "../components/reports/ConsolidatedReportView";
+import { EvaluationsOverview } from "../components/review/EvaluationsOverview";
+import { SessionReview } from "../components/review/SessionReview";
 import { SessionSetup, SessionData } from "../components/session/SessionForm";
-import Link from "next/link";
+import { SavedRecording } from "../lib/api";
 
 export default function Page() {
-  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "library" | "evaluation">("setup");
+  const [step, setStep] = useState<"setup" | "calibration" | "recording" | "finished" | "evaluations" | "history" | "evaluation">("setup");
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [videoSaveMessage, setVideoSaveMessage] = useState("");
+  const [reviewRecordings, setReviewRecordings] = useState<SavedRecording[] | null>(null);
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [audioContext, setAudioContext] = useState<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -58,7 +62,14 @@ export default function Page() {
     setStep("recording");
   };
 
-  const handleStopRecording = () => {
+  const handleStopRecording = (result: TranscriptSaveResult) => {
+    if (result.videoStorage === "local") {
+      setVideoSaveMessage("El video se guardó en este equipo.");
+    } else if (result.videoUrl) {
+      setVideoSaveMessage("El video se guardó correctamente.");
+    } else {
+      setVideoSaveMessage("No se pudo guardar el video.");
+    }
     setStep("finished");
   };
 
@@ -70,6 +81,7 @@ export default function Page() {
     setAudioContext(null);
     setStream(null);
     setSessionData(null);
+    setReviewRecordings(null);
     setStep("setup");
   };
 
@@ -86,21 +98,38 @@ export default function Page() {
             <SessionSetup onSessionReady={handleSessionReady} />
             <button
               type="button"
-              onClick={() => setStep("library")}
+              onClick={() => setStep("evaluations")}
               className="mt-4 w-full rounded-xl border border-white/15 py-3.5 text-sm font-semibold text-[#e9f0ed] hover:border-white/30"
             >
-              Grabaciones guardadas
+              Evaluaciones anteriores
             </button>
-            <Link
-              href="/gpt-transcribe"
-              className="mt-2 block w-full rounded-xl border border-[#9ce4c1]/30 py-3.5 text-center text-sm font-semibold text-[#9ce4c1] hover:bg-[#9ce4c1]/10"
-            >
-              Probar velocidad de GPT Transcribe
-            </Link>
           </div>
         )}
 
-        {step === "library" && <RecordingsLibrary onBack={() => setStep("setup")} />}
+        {step === "evaluations" && (
+          <EvaluationsOverview
+            onBack={() => setStep("setup")}
+            onSelectCandidate={(recordings) => {
+              setReviewRecordings(recordings);
+              setStep("history");
+            }}
+          />
+        )}
+
+        {step === "history" && (
+          <div className="w-full">
+            <SessionReview
+              session={sessionData}
+              transcript={null}
+              recordings={reviewRecordings ?? undefined}
+              onBack={() => {
+                setReviewRecordings(null);
+                setStep("evaluations");
+              }}
+              onNewSession={handleNewSession}
+            />
+          </div>
+        )}
 
         {step === "calibration" && (
           <div className="calibration-page w-full max-w-4xl rounded-3xl border border-white/10 bg-[#11191e]/90 p-8 shadow-2xl backdrop-blur-md">
@@ -124,8 +153,7 @@ export default function Page() {
             </div>
             <h2 className="mb-2 text-2xl font-bold">Grabación finalizada</h2>
             <p className="mb-8 text-sm text-[#82918f]">
-              La sesión del candidato{" "}
-              <span className="font-semibold text-[#e9f0ed]">{sessionData?.candidateName || "registrado"}</span> se ha guardado correctamente.
+              {videoSaveMessage}
             </p>
             <div className="flex w-full flex-col gap-3">
               <button
@@ -146,7 +174,7 @@ export default function Page() {
           </div>
         )}
 
-        {step === "evaluation" && (
+        {step === "evaluation" && sessionData && (
           <div className="w-full max-w-5xl pt-6">
             <div className="mb-4 flex justify-end">
               <button
@@ -158,11 +186,12 @@ export default function Page() {
               </button>
             </div>
             <ConsolidatedReportView
-              sessionId={sessionData?.sessionId || "SES-DEMO-01"}
-              candidateName={sessionData?.candidateName || "Candidato"}
-              evaluatorName={sessionData?.evaluatorName || ""}
-              technology={sessionData?.technology || ""}
-              complexity={sessionData?.complexity || ""}
+              sessionId={sessionData.sessionId}
+              candidateName={sessionData.candidateName}
+              evaluatorName={sessionData.evaluatorName}
+              technology={sessionData.technology}
+              complexity={sessionData.complexity}
+              autoSuggest
             />
           </div>
         )}

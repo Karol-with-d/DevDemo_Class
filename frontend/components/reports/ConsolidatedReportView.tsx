@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
-import { NLPVocabularyViewer } from "./NLPVocabularyViewer";
+import { getEvaluation, getRubricSuggestions, saveEvaluation, type RubricSuggestion, type TechnicalTerm, type TranscriptSegment } from "../../lib/api";
+import rubric from "../../lib/univo-rubric.json";
+import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
-
-const API_BASE_URL = "http://127.0.0.1:8000";
 
 export type UnivoScale = "E" | "MB" | "B" | "R" | "NM";
 export type VerdictOption =
@@ -18,14 +18,16 @@ interface DimensionItem {
   id: string;
   title: string;
   univoScope: string;
-  aiScore: number;
-  adjustedScore: number;
-  scale: UnivoScale;
+  aiScore: number | null;
+  adjustedScore: number | null;
+  scale: UnivoScale | null;
   feedback: string;
+  evidence: string | null;
 }
 
 interface ConsolidatedReportViewProps {
-  sessionId?: string;
+  sessionId: string;
+  autoSuggest?: boolean;
   candidateName?: string;
   evaluatorName?: string;
   technology?: string;
@@ -55,44 +57,46 @@ const QUICK_TAGS = [
   "Reforzar retroalimentación de errores",
 ];
 
-const INITIAL_DIMENSIONS: DimensionItem[] = [
-  {
-    id: "innovacion_actualizacion",
-    title: "Innovación y Actualización",
-    univoScope: "Ítems 1–6 · Puntualidad, competencia, pre-saberes, dicción, recursos y PNL",
-    aiScore: 88,
-    adjustedScore: 88,
-    scale: "MB",
-    feedback: "Buen ritmo vocal, uso de recursos tecnológicos y terminología técnica pertinente.",
-  },
-  {
-    id: "calidad_ensenanza",
-    title: "Calidad de la Enseñanza",
-    univoScope: "Ítems 7–14 · Plan de clase, distribución del tiempo, dominio y estrategias",
-    aiScore: 85,
-    adjustedScore: 85,
-    scale: "MB",
-    feedback: "Estructura ordenada y explicación clara de conceptos clave.",
-  },
-  {
-    id: "relacion_estudiantes",
-    title: "Relación con los Estudiantes",
-    univoScope: "Ítems 15–20 · Respeto, conducción, ejemplos vivenciales, interés y consultas",
-    aiScore: 80,
-    adjustedScore: 80,
-    scale: "MB",
-    feedback: "Trato cordial y atención a consultas; se puede ampliar participación.",
-  },
-  {
-    id: "evaluacion_retroalimentacion",
-    title: "Evaluación y Retroalimentación",
-    univoScope: "Ítems 21–26 · Seguimiento, comprensión, retroalimentación y cierre",
-    aiScore: 78,
-    adjustedScore: 78,
-    scale: "B",
-    feedback: "Comprueba comprensión durante la sesión; reforzar síntesis final.",
-  },
-];
+const INITIAL_DIMENSIONS: DimensionItem[] = rubric.map(({ id, title, univoScope }) => ({
+  id,
+  title,
+  univoScope,
+  aiScore: null,
+  adjustedScore: null,
+  scale: null,
+  feedback: "",
+  evidence: null,
+}));
+
+function applySuggestions(dimensions: DimensionItem[], suggestions: RubricSuggestion[]) {
+  return dimensions.map((dimension) => {
+    const suggestion = suggestions.find(({ id }) => id === dimension.id);
+    if (!suggestion) return dimension;
+    const adjustedScore = dimension.adjustedScore ?? suggestion.score;
+    return {
+      ...dimension,
+      aiScore: suggestion.score,
+      adjustedScore,
+      scale: adjustedScore === null ? null : scoreToScale(adjustedScore),
+      feedback: suggestion.feedback,
+      evidence: suggestion.evidence,
+    };
+  });
+}
+
+function escapeHtml(value: string) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function formatScore(score: number | null) {
+  return score === null ? "Sin evaluar" : `${score}%`;
+}
+
+function savedScore(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    ? value
+    : null;
+}
 
 function scoreToScale(score: number): UnivoScale {
   if (score >= 92) return "E";
@@ -103,17 +107,18 @@ function scoreToScale(score: number): UnivoScale {
 }
 
 export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
-  sessionId = "SES-DEMO-01",
+  sessionId,
+  autoSuggest = false,
   candidateName = "Candidato",
   evaluatorName = "",
   technology = "",
   complexity = "",
 }) => {
   const [dimensions, setDimensions] = useState<DimensionItem[]>(INITIAL_DIMENSIONS);
-  const [verdict, setVerdict] = useState<VerdictOption>("Cumple adecuadamente");
+  const [verdict, setVerdict] = useState<VerdictOption | null>(null);
   const [qualitativeNotes, setQualitativeNotes] = useState("");
   const [savedPayload, setSavedPayload] = useState<string | null>(null);
-  const [s3Key, setS3Key] = useState<string | null>(null);
+  const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [showAdvancedViews, setShowAdvancedViews] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
@@ -121,95 +126,109 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     text: string;
   } | null>(null);
 
-  const sampleTranscript =
-    "Durante la sesión implementamos un enfoque basado en componentes utilizando TypeScript, aplicando arquitecturas MVC y controlando el flujo de estados mediante hooks de React en el entorno de desarrollo.";
-  const sampleTerms = ["TypeScript", "MVC", "hooks", "React", "componentes"];
+  const [segments, setSegments] = useState<TranscriptSegment[]>([]);
+  const [vocabulary, setVocabulary] = useState<TechnicalTerm[]>([]);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
+  const [suggestionError, setSuggestionError] = useState<string | null>(null);
+
+  const requestSuggestions = useCallback(async (signal?: AbortSignal) => {
+    setSuggesting(true);
+    setSuggestionError(null);
+    try {
+      const { dimensions: suggestions } = await getRubricSuggestions(sessionId, signal);
+      if (signal?.aborted) return;
+      setDimensions((current) => applySuggestions(current, suggestions));
+      setSuggestionsLoaded(suggestions.length > 0);
+    } catch (error) {
+      if (!signal?.aborted && error instanceof Error) {
+        setSuggestionError(error.message);
+      }
+    } finally {
+      if (!signal?.aborted) setSuggesting(false);
+    }
+  }, [sessionId]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
 
-    const loadExistingEvaluation = async () => {
+    async function load() {
+      let context;
       try {
-        const res = await fetch(
-          `${API_BASE_URL}/evaluations/${encodeURIComponent(sessionId)}`
-        );
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled || !data?.evaluation) return;
+        context = await getEvaluation(sessionId, signal);
+      } catch {
+        if (!signal.aborted) setLoadState("error");
+        return;
+      }
+      if (signal.aborted) return;
 
-        const saved = data.evaluation;
-        if (Array.isArray(saved.rubricScores) && saved.rubricScores.length > 0) {
-          setDimensions((prev) =>
-            prev.map((item) => {
-              const match = saved.rubricScores.find(
-                (r: {
-                  id?: string;
-                  aiScore?: number;
-                  finalScore?: number;
-                  scale?: UnivoScale;
-                }) => r.id === item.id
-              );
-              if (!match) return item;
-              const nextScore =
-                typeof match.finalScore === "number" ? match.finalScore : item.adjustedScore;
-              return {
-                ...item,
-                aiScore: typeof match.aiScore === "number" ? match.aiScore : item.aiScore,
-                adjustedScore: nextScore,
-                scale: match.scale || scoreToScale(nextScore),
-              };
-            })
-          );
-        }
-
-        if (saved.overallVerdict && VERDICT_OPTIONS.includes(saved.overallVerdict)) {
-          setVerdict(saved.overallVerdict);
+      setSegments(context.segments);
+      setVocabulary(context.vocabulary);
+      const saved = context.evaluation;
+      if (saved) {
+        const scores = Array.isArray(saved.rubricScores) ? saved.rubricScores : [];
+        setDimensions(INITIAL_DIMENSIONS.map((item) => {
+          const score = scores.find((entry) => entry?.id === item.id);
+          if (!score) return item;
+          const adjustedScore = savedScore(score.finalScore);
+          const savedScale = SCALE_OPTIONS.find(({ code }) => code === score.scale);
+          return {
+            ...item,
+            aiScore: savedScore(score.aiScore),
+            adjustedScore,
+            scale: adjustedScore === null ? null : savedScale?.code ?? scoreToScale(adjustedScore),
+            feedback: typeof score.feedback === "string" ? score.feedback : "",
+            evidence: typeof score.evidence === "string" ? score.evidence : null,
+          };
+        }));
+        if (saved.overallVerdict && VERDICT_OPTIONS.includes(saved.overallVerdict as VerdictOption)) {
+          setVerdict(saved.overallVerdict as VerdictOption);
         }
         if (typeof saved.qualitativeObservations === "string") {
           setQualitativeNotes(saved.qualitativeObservations);
         }
-
         setSavedPayload(JSON.stringify(saved, null, 2));
-        setStatusMessage({
-          type: "info",
-          text: `Evaluación cargada desde ${data.source === "s3" ? "AWS S3" : "registro local"}.`,
-        });
-      } catch {
-        // No bloquear si el backend aún no arranca
+        setSavedLocation(context.source === "s3" ? "en AWS S3" : "en este equipo");
+        setSuggestionsLoaded(true);
       }
-    };
 
-    loadExistingEvaluation();
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
+      setLoadState("ready");
+      if (!saved && autoSuggest && context.segments.some(({ text }) => text.trim())) {
+        await requestSuggestions(signal);
+      }
+    }
+
+    void load();
+    return () => controller.abort();
+  }, [sessionId, autoSuggest, loadAttempt, requestSuggestions]);
 
   const metrics = useMemo(() => {
-    const avgScore =
-      dimensions.length > 0
-        ? Math.round(
-            dimensions.reduce((acc, d) => acc + d.adjustedScore, 0) / dimensions.length
-          )
-        : 0;
+    const scores = dimensions.flatMap(({ adjustedScore }) => adjustedScore === null ? [] : [adjustedScore]);
+    const avgScore = scores.length
+      ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length)
+      : null;
     const counts: Record<UnivoScale, number> = { E: 0, MB: 0, B: 0, R: 0, NM: 0 };
-    for (const d of dimensions) {
-      counts[d.scale] += 1;
+    for (const { scale } of dimensions) {
+      if (scale) counts[scale] += 1;
     }
     return { avgScore, counts };
   }, [dimensions]);
 
-  const legacyIndicators: RubricIndicator[] = useMemo(
-    () =>
-      dimensions.map((d) => ({
-        id: d.id,
-        label: d.title,
-        aiScore: d.aiScore,
-        adjustedScore: d.adjustedScore,
-        feedback: d.feedback,
-      })),
-    [dimensions]
+  const legacyIndicators: RubricIndicator[] = dimensions.flatMap((item) =>
+    item.adjustedScore === null ? [] : [{
+      id: item.id,
+      label: item.title,
+      aiScore: item.aiScore,
+      adjustedScore: item.adjustedScore,
+      feedback: item.feedback,
+    }],
   );
+
+  const hasTranscript = segments.some(({ text }) => text.trim());
+  const terms = vocabulary.map(({ term }) => term);
 
   const buildEvaluationPayload = () => ({
     sessionId,
@@ -222,22 +241,23 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     quantitativeSummary: {
       averageScore: metrics.avgScore,
       scaleDistribution: metrics.counts,
-      nlpTermsCount: sampleTerms.length,
+      nlpTermsCount: terms.length,
     },
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
-      ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback }) => ({
+      ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback, evidence }) => ({
         id,
         label: title,
         univoScope,
         scale,
         aiScore,
         finalScore: adjustedScore,
-        manuallyAdjusted: aiScore !== adjustedScore,
+        manuallyAdjusted: adjustedScore !== null && aiScore !== adjustedScore,
         feedback,
+        evidence,
       })
     ),
-    nlpDetectedTerms: sampleTerms,
+    nlpDetectedTerms: terms,
     qualitativeObservations: qualitativeNotes,
   });
 
@@ -251,13 +271,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         (r) => `
           <tr>
             <td style="padding:10px;border:1px solid #cbd5e1;">
-              <strong>${r.label}</strong><br/>
-              <span style="font-size:11px;color:#475569;">${r.univoScope}</span><br/>
-              <span style="font-size:12px;color:#334155;">${r.feedback || ""}</span>
+              <strong>${escapeHtml(r.label)}</strong><br/>
+              <span style="font-size:11px;color:#475569;">${escapeHtml(r.univoScope)}</span><br/>
+              <span style="font-size:12px;color:#334155;">${escapeHtml(r.feedback)}${r.evidence ? `<br/>«${escapeHtml(r.evidence)}»` : ""}</span>
             </td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;">${r.aiScore}%</td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.finalScore}%</td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.scale}</td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;">${r.aiScore === null ? "Sin sugerencia" : formatScore(r.aiScore)}</td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${formatScore(r.finalScore)}</td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.scale ?? "—"}</td>
           </tr>
         `
       )
@@ -299,11 +319,11 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
         <h1>Consolidado de Evaluación — Rúbrica UNIVO</h1>
         <div class="meta">
-          Sesión: <strong>${data.sessionId}</strong> · Candidato: <strong>${data.candidateName || "N/D"}</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
+          Sesión: <strong>${escapeHtml(data.sessionId)}</strong> · Candidato: <strong>${escapeHtml(data.candidateName || "N/D")}</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
         </div>
         <div class="summary">
-          <div class="box">Promedio Final: <strong>${data.quantitativeSummary.averageScore}%</strong></div>
-          <div class="box">Dictamen: <strong>${data.overallVerdict}</strong></div>
+          <div class="box">Promedio de dimensiones calificadas: <strong>${formatScore(data.quantitativeSummary.averageScore)}</strong></div>
+          <div class="box">Dictamen: <strong>${data.overallVerdict ?? "Pendiente"}</strong></div>
           <div class="box">Escala: E:${data.quantitativeSummary.scaleDistribution.E} · MB:${data.quantitativeSummary.scaleDistribution.MB} · B:${data.quantitativeSummary.scaleDistribution.B} · R:${data.quantitativeSummary.scaleDistribution.R} · NM:${data.quantitativeSummary.scaleDistribution.NM}</div>
         </div>
         <table>
@@ -319,7 +339,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </table>
         <div class="notes">
           <strong>Observaciones del Evaluador:</strong>
-          <p style="margin:6px 0 0;">${data.qualitativeObservations || "Sin observaciones adicionales."}</p>
+          <p style="margin:6px 0 0;">${escapeHtml(data.qualitativeObservations || "Sin observaciones adicionales.")}</p>
         </div>
         <script>
           window.onload = function() { setTimeout(function() { window.print(); }, 250); };
@@ -350,12 +370,12 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     );
   };
 
-  const handleScoreChange = (id: string, newScore: number) => {
-    const clamped = Math.max(0, Math.min(100, Number(newScore) || 0));
+  const handleScoreChange = (id: string, newScore: number | null) => {
+    const clamped = newScore === null ? null : Math.round(Math.max(0, Math.min(100, newScore)));
     setDimensions((prev) =>
       prev.map((item) =>
         item.id === id
-          ? { ...item, adjustedScore: clamped, scale: scoreToScale(clamped) }
+          ? { ...item, adjustedScore: clamped, scale: clamped === null ? null : scoreToScale(clamped) }
           : item
       )
     );
@@ -382,25 +402,15 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     const jsonPayload = buildEvaluationPayload();
 
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/evaluations/${encodeURIComponent(sessionId)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(jsonPayload),
-        }
-      );
+      const result = await saveEvaluation(sessionId, jsonPayload);
 
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(result.detail || `Error HTTP ${response.status}`);
-      }
-
+      const location = result.source === "s3" ? "en AWS S3" : "en este equipo";
       setSavedPayload(JSON.stringify(jsonPayload, null, 2));
-      setS3Key(result.key || `recordings/${sessionId}/evaluation.json`);
+      setSuggestionsLoaded(true);
+      setSavedLocation(location);
       setStatusMessage({
         type: "success",
-        text: `Guardado en AWS S3 (${result.key || "evaluation.json"})`,
+        text: `Evaluación guardada ${location}.`,
       });
     } catch (err) {
       const message =
@@ -414,6 +424,21 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     }
   };
 
+  if (loadState === "loading") return <p role="status">Cargando transcripción y rúbrica…</p>;
+  if (loadState === "error") {
+    return (
+      <div className="space-y-2">
+        <p role="alert">No se pudo consultar la evaluación guardada.</p>
+        <button type="button" className="underline" onClick={() => {
+          setLoadState("loading");
+          setLoadAttempt((attempt) => attempt + 1);
+        }}>
+          Reintentar
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
       {/* Encabezado + KPIs rápidos + Descarga de rúbrica */}
@@ -426,7 +451,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-emerald-400 border border-emerald-500/30">
-            Promedio: {metrics.avgScore}%
+            Promedio de dimensiones calificadas: {formatScore(metrics.avgScore)}
           </span>
           <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-slate-300 border border-slate-700">
             {sessionId}
@@ -434,6 +459,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           <button
             type="button"
             onClick={handleDownloadRubric}
+            disabled={suggesting}
             className="text-xs px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 font-medium border border-emerald-500/40 transition-colors cursor-pointer"
           >
             Descargar Rúbrica
@@ -465,6 +491,18 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </button>
       </div>
 
+      <div className="space-y-2 text-sm text-slate-300">
+        <p>Revisa las sugerencias y completa las dimensiones pendientes antes de usar el resultado.</p>
+        {!hasTranscript && <p>No hay una transcripción guardada. Puedes calificar la sesión manualmente.</p>}
+        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción…</p>}
+        {suggestionError && <p role="alert" className="text-rose-400">{suggestionError}</p>}
+        {hasTranscript && !suggesting && !suggestionsLoaded && !savedPayload && (
+          <button type="button" className="text-emerald-300 underline" onClick={() => void requestSuggestions()}>
+            {suggestionError ? "Reintentar sugerencias" : "Generar sugerencias"}
+          </button>
+        )}
+      </div>
+
       {/* Rúbrica ágil por dimensiones UNIVO */}
       <div className="space-y-3">
         {dimensions.map((item) => (
@@ -476,11 +514,14 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               <div className="flex items-center gap-2">
                 <h3 className="font-semibold text-white text-sm">{item.title}</h3>
                 <span className="text-[11px] font-mono text-slate-400">
-                  IA: {item.aiScore} → {item.adjustedScore}
+                  {item.aiScore === null
+                    ? "Sin sugerencia"
+                    : `${item.evidence ? "IA" : "IA anterior sin cita"}: ${item.aiScore}%`}
                 </span>
               </div>
               <p className="text-[11px] text-emerald-400/90">{item.univoScope}</p>
-              <p className="text-xs text-slate-400">{item.feedback}</p>
+              {item.feedback && <p className="text-xs text-slate-400">{item.feedback}</p>}
+              {item.evidence && <blockquote className="text-xs text-slate-300">«{item.evidence}»</blockquote>}
             </div>
 
             <div className="flex flex-col items-start md:items-end gap-2">
@@ -511,8 +552,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                   type="number"
                   min={0}
                   max={100}
-                  value={item.adjustedScore}
-                  onChange={(e) => handleScoreChange(item.id, Number(e.target.value))}
+                  value={item.adjustedScore ?? ""}
+                  placeholder="—"
+                  onChange={(e) => handleScoreChange(item.id, e.target.value === "" ? null : Number(e.target.value))}
                   className="w-16 bg-slate-950 border border-slate-800 rounded px-2 py-0.5 text-right text-slate-100 font-mono text-xs"
                 />
               </label>
@@ -524,25 +566,24 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       {/* Vista expandible opcional con componentes previos */}
       {showAdvancedViews && (
         <div className="space-y-4 pt-2">
-          <PerformanceMetricsChart
-            metrics={dimensions.map((item) => ({
-              indicator: item.title,
-              score: item.adjustedScore,
-              feedback: item.feedback,
-            }))}
-          />
-          <HybridRubricEditor
-            indicators={legacyIndicators}
-            onScoreChange={handleScoreChange}
-          />
-          <NLPVocabularyViewer
-            transcript={sampleTranscript}
-            technicalTerms={sampleTerms}
-          />
+          {legacyIndicators.length > 0 && (
+            <>
+              <PerformanceMetricsChart
+                metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
+                  { indicator: label, score: adjustedScore, feedback }
+                ))}
+              />
+              <HybridRubricEditor
+                indicators={legacyIndicators}
+                onScoreChange={handleScoreChange}
+              />
+            </>
+          )}
+          {hasTranscript && <TechnicalTranscript segments={segments} vocabulary={vocabulary} />}
         </div>
       )}
 
-      {/* Dictamen rápido + Chips + Observaciones y Guardado en S3 */}
+      {/* Dictamen, observaciones y guardado */}
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
         <div>
           <h3 className="text-base font-semibold text-emerald-400">
@@ -605,15 +646,16 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
             <button
               type="button"
               onClick={handleSaveEvaluation}
-              disabled={isSaving}
+              disabled={isSaving || suggesting}
               className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
             >
-              {isSaving ? "Guardando en S3..." : "Guardar Evaluación Consolidada"}
+              {isSaving ? "Guardando evaluación..." : "Guardar Evaluación Consolidada"}
             </button>
 
             <button
               type="button"
               onClick={handleDownloadRubric}
+              disabled={suggesting}
               className="px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-slate-950 hover:bg-slate-800 text-emerald-300 font-medium text-sm transition-colors cursor-pointer"
             >
               Descargar Rúbrica
@@ -639,7 +681,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         {savedPayload && (
           <div className="mt-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
             <p className="text-xs text-slate-400 mb-2 font-mono">
-              JSON persistido {s3Key ? `en S3 (${s3Key})` : ""}:
+              Evaluación guardada {savedLocation}
             </p>
             <pre className="text-xs text-emerald-300 overflow-x-auto">{savedPayload}</pre>
           </div>
