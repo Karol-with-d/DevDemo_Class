@@ -1,5 +1,17 @@
 const API_BASE = "http://127.0.0.1:8000";
 
+async function errorMessage(response: Response, fallback: string) {
+  const raw = await response.text();
+  if (!raw) return fallback;
+  try {
+    const payload = JSON.parse(raw) as { detail?: unknown };
+    if (typeof payload.detail === "string" && payload.detail) return payload.detail;
+  } catch {
+    return raw;
+  }
+  return raw;
+}
+
 export type TechnicalTerm = {
   term: string;
   lemma?: string;
@@ -47,8 +59,7 @@ export async function uploadRecording(
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `No se pudo subir el video (${response.status})`);
+    throw new Error(await errorMessage(response, `No se pudo subir el video (${response.status})`));
   }
 
   const payload = (await response.json()) as { video_url?: string; key?: string };
@@ -75,7 +86,6 @@ export async function deleteRecording(sessionId: string): Promise<void> {
     method: "DELETE",
   });
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || "No se pudo eliminar la grabación.");
+    throw new Error(await errorMessage(response, "No se pudo eliminar la grabación."));
   }
 }

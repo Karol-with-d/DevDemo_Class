@@ -38,13 +38,11 @@ export function RecordingsLibrary({ onBack }: RecordingsLibraryProps) {
   }, []);
 
   const removeFromList = (sessionId: string) => {
-    setItems((current) => {
-      const next = current.filter((item) => item.sessionId !== sessionId);
-      setSelected((selectedItem) => {
-        if (selectedItem?.sessionId !== sessionId) return selectedItem;
-        return next[0] ?? null;
-      });
-      return next;
+    setItems((current) => current.filter((item) => item.sessionId !== sessionId));
+    setSelected((selectedItem) => {
+      if (selectedItem?.sessionId !== sessionId) return selectedItem;
+      const next = items.filter((item) => item.sessionId !== sessionId);
+      return next[0] ?? null;
     });
   };
 

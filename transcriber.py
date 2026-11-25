@@ -4,6 +4,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 from datetime import datetime
 
 import numpy as np
@@ -35,29 +36,52 @@ def on_audio(indata, frames, time, status):
 
 
 def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
+    return _run_transcription(samples, sample_rate, context, style_prompt)["text"]
+
+
+def _run_transcription(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
+    """Same live-recorder call as send_to_whisper, plus timings for the speed log."""
     samples = np.asarray(samples, dtype=np.float32)
     if samples.ndim > 1:
         samples = samples.mean(axis=1)
+    audio_seconds = float(samples.size) / float(sample_rate or 1)
     if samples.size == 0:
-        return ""
+        return {"text": "", "audioSeconds": 0, "apiMs": 0, "reason": "silence"}
     volume = float(np.sqrt(np.mean(samples ** 2)))
     if volume < 0.012:
-        return ""
+        return {
+            "text": "",
+            "audioSeconds": round(audio_seconds, 2),
+            "apiMs": 0,
+            "reason": "silence",
+        }
     previous = _as_previous(context if context is not None else full_text[-2:])
     buf = io.BytesIO()
     sf.write(buf, samples, sample_rate, format="WAV")
     buf.name = "chunk.wav"
     buf.seek(0)
+    started = time.perf_counter()
     result = get_client().audio.transcriptions.create(
-        model="gpt-4o-mini-transcribe",
+        model="gpt-transcribe",
         file=buf,
-        language="es",
         prompt=(style_prompt or "Transcripción en español. Solo el audio de este fragmento.")[:500],
+        extra_body={"languages": ["es"]},
     )
+    api_ms = int(round((time.perf_counter() - started) * 1000))
     text = _without_prompt_echo(result.text)
-    if _is_repeat_or_junk(text, previous):
-        return ""
-    return text
+    if not text:
+        reason = "empty"
+    elif _is_repeat_or_junk(text, previous):
+        text = ""
+        reason = "filtered"
+    else:
+        reason = "ok"
+    return {
+        "text": text,
+        "audioSeconds": round(audio_seconds, 2),
+        "apiMs": api_ms,
+        "reason": reason,
+    }
 
 
 def _as_previous(context):
@@ -65,11 +89,11 @@ def _as_previous(context):
         return []
     if isinstance(context, str):
         return [context] if context.strip() else []
-    return [item for item in context if item]
+    return [str(item) for item in context if item]
 
 
 def _normalize_caption(text):
-    return " ".join((text or "").lower().split())
+    return " ".join(str(text or "").lower().split())
 
 
 def _without_prompt_echo(text):
@@ -118,14 +142,69 @@ def _is_repeat_or_junk(text, previous):
 
 
 def transcribe_wav_bytes(data, context="", style_prompt=None):
+    return transcribe_wav_report(data, context, style_prompt)["text"]
+
+
+def transcribe_wav_report(data, context="", style_prompt=None):
+    started = time.perf_counter()
     incoming = io.BytesIO(data)
     samples, sample_rate = sf.read(incoming, dtype="float32", always_2d=False)
-    return send_to_whisper(
-        samples,
-        int(sample_rate),
-        context=context,
-        style_prompt=style_prompt,
+    decode_ms = int(round((time.perf_counter() - started) * 1000))
+    report = _run_transcription(samples, int(sample_rate), context, style_prompt)
+    report["decodeMs"] = decode_ms
+    return report
+
+
+def transcribe_speed_demo(data, language="es"):
+    """One microphone clip through gpt-transcribe, with the API call timed.
+
+    The class recorder filters repeats and prompt echoes. This path returns
+    the model text as-is so a speed test shows what actually came back.
+    """
+    import time
+
+    incoming = io.BytesIO(data)
+    samples, sample_rate = sf.read(incoming, dtype="float32", always_2d=False)
+    samples = np.asarray(samples, dtype=np.float32)
+    if samples.ndim > 1:
+        samples = samples.mean(axis=1)
+    audio_seconds = float(samples.size) / float(sample_rate or 1)
+    if samples.size == 0:
+        return {"text": "", "apiMs": 0, "audioSeconds": 0, "skipped": True}
+    volume = float(np.sqrt(np.mean(samples ** 2)))
+    if volume < 0.012:
+        print(
+            f"[TIME demo] audio={audio_seconds:.2f}s api=0ms skipped=silence",
+            flush=True,
+        )
+        return {
+            "text": "",
+            "apiMs": 0,
+            "audioSeconds": round(audio_seconds, 2),
+            "skipped": True,
+        }
+    buf = io.BytesIO()
+    sf.write(buf, samples, int(sample_rate), format="WAV")
+    buf.name = "demo.wav"
+    buf.seek(0)
+    started = time.perf_counter()
+    result = get_client().audio.transcriptions.create(
+        model="gpt-transcribe",
+        file=buf,
+        extra_body={"languages": [language]},
     )
+    api_ms = int(round((time.perf_counter() - started) * 1000))
+    text = " ".join((getattr(result, "text", "") or "").split())
+    print(
+        f"[TIME demo] audio={audio_seconds:.2f}s api={api_ms}ms text={len(text)}c",
+        flush=True,
+    )
+    return {
+        "text": text,
+        "apiMs": api_ms,
+        "audioSeconds": round(audio_seconds, 2),
+        "skipped": False,
+    }
 
 
 def transcribe_loop(stop_event):
@@ -342,8 +421,12 @@ def load_session_record(session_id):
     path = _session_json_path(session_id)
     if not os.path.isfile(path):
         return None
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def attach_video_key(session_id, video_key):

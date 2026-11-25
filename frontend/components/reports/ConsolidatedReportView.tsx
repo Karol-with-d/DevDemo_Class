@@ -3,6 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
 import { NLPVocabularyViewer } from "./NLPVocabularyViewer";
+import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
 
 const API_BASE_URL = "http://127.0.0.1:8000";
 
@@ -185,9 +186,12 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   }, [sessionId]);
 
   const metrics = useMemo(() => {
-    const avgScore = Math.round(
-      dimensions.reduce((acc, d) => acc + d.adjustedScore, 0) / dimensions.length
-    );
+    const avgScore =
+      dimensions.length > 0
+        ? Math.round(
+            dimensions.reduce((acc, d) => acc + d.adjustedScore, 0) / dimensions.length
+          )
+        : 0;
     const counts: Record<UnivoScale, number> = { E: 0, MB: 0, B: 0, R: 0, NM: 0 };
     for (const d of dimensions) {
       counts[d.scale] += 1;
@@ -206,6 +210,130 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       })),
     [dimensions]
   );
+
+  const buildEvaluationPayload = () => ({
+    sessionId,
+    candidateName,
+    evaluatorName,
+    technology,
+    complexity,
+    rubricStandard: "UNIVO-Observacion-Docente",
+    overallVerdict: verdict,
+    quantitativeSummary: {
+      averageScore: metrics.avgScore,
+      scaleDistribution: metrics.counts,
+      nlpTermsCount: sampleTerms.length,
+    },
+    timestamp: new Date().toISOString(),
+    rubricScores: dimensions.map(
+      ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback }) => ({
+        id,
+        label: title,
+        univoScope,
+        scale,
+        aiScore,
+        finalScore: adjustedScore,
+        manuallyAdjusted: aiScore !== adjustedScore,
+        feedback,
+      })
+    ),
+    nlpDetectedTerms: sampleTerms,
+    qualitativeObservations: qualitativeNotes,
+  });
+
+  const handleDownloadRubric = () => {
+    const data = buildEvaluationPayload();
+    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const fileTitle = `Rubrica_${safeSessionId}_${new Date().toISOString().slice(0, 10)}`;
+
+    const rowsHtml = data.rubricScores
+      .map(
+        (r) => `
+          <tr>
+            <td style="padding:10px;border:1px solid #cbd5e1;">
+              <strong>${r.label}</strong><br/>
+              <span style="font-size:11px;color:#475569;">${r.univoScope}</span><br/>
+              <span style="font-size:12px;color:#334155;">${r.feedback || ""}</span>
+            </td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;">${r.aiScore}%</td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.finalScore}%</td>
+            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.scale}</td>
+          </tr>
+        `
+      )
+      .join("");
+
+    const printWindow = window.open("", "_blank", "width=900,height=700");
+    if (!printWindow) {
+      setStatusMessage({
+        type: "error",
+        text: "Permite las ventanas emergentes en el navegador para exportar el PDF.",
+      });
+      return;
+    }
+
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html lang="es">
+      <head>
+        <meta charset="UTF-8" />
+        <title>${fileTitle}</title>
+        <style>
+          body { font-family: Arial, sans-serif; color: #0f172a; padding: 28px; }
+          h1 { margin: 0 0 6px; font-size: 20px; }
+          .meta { font-size: 12px; color: #475569; margin-bottom: 18px; }
+          .summary { display: flex; gap: 16px; margin-bottom: 18px; font-size: 13px; flex-wrap: wrap; }
+          .box { border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px 14px; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 18px; font-size: 13px; }
+          th { background: #f1f5f9; padding: 10px; border: 1px solid #cbd5e1; text-align: left; }
+          th.center { text-align: center; }
+          .notes { border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; background: #f8fafc; font-size: 13px; }
+          @media print { .no-print { display: none; } }
+        </style>
+      </head>
+      <body>
+        <div class="no-print" style="margin-bottom:14px;">
+          <button onclick="window.print()" style="padding:8px 14px;background:#059669;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">
+            Guardar como PDF / Imprimir
+          </button>
+        </div>
+        <h1>Consolidado de Evaluación — Rúbrica UNIVO</h1>
+        <div class="meta">
+          Sesión: <strong>${data.sessionId}</strong> · Candidato: <strong>${data.candidateName || "N/D"}</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
+        </div>
+        <div class="summary">
+          <div class="box">Promedio Final: <strong>${data.quantitativeSummary.averageScore}%</strong></div>
+          <div class="box">Dictamen: <strong>${data.overallVerdict}</strong></div>
+          <div class="box">Escala: E:${data.quantitativeSummary.scaleDistribution.E} · MB:${data.quantitativeSummary.scaleDistribution.MB} · B:${data.quantitativeSummary.scaleDistribution.B} · R:${data.quantitativeSummary.scaleDistribution.R} · NM:${data.quantitativeSummary.scaleDistribution.NM}</div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Dimensión</th>
+              <th class="center">IA</th>
+              <th class="center">Puntaje Final</th>
+              <th class="center">Escala</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+        <div class="notes">
+          <strong>Observaciones del Evaluador:</strong>
+          <p style="margin:6px 0 0;">${data.qualitativeObservations || "Sin observaciones adicionales."}</p>
+        </div>
+        <script>
+          window.onload = function() { setTimeout(function() { window.print(); }, 250); };
+        </script>
+      </body>
+      </html>
+    `);
+    printWindow.document.close();
+
+    setStatusMessage({
+      type: "info",
+      text: "Vista de impresión abierta: selecciona 'Guardar como PDF' para descargarlo.",
+    });
+  };
 
   const handleScaleSelect = (id: string, scale: UnivoScale) => {
     const preset = SCALE_OPTIONS.find((s) => s.code === scale);
@@ -251,32 +379,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     setIsSaving(true);
     setStatusMessage(null);
 
-    const jsonPayload = {
-      sessionId,
-      candidateName,
-      evaluatorName,
-      technology,
-      complexity,
-      rubricStandard: "UNIVO-Observacion-Docente",
-      overallVerdict: verdict,
-      quantitativeSummary: {
-        averageScore: metrics.avgScore,
-        scaleDistribution: metrics.counts,
-        nlpTermsCount: sampleTerms.length,
-      },
-      timestamp: new Date().toISOString(),
-      rubricScores: dimensions.map(({ id, title, univoScope, aiScore, adjustedScore, scale }) => ({
-        id,
-        label: title,
-        univoScope,
-        scale,
-        aiScore,
-        finalScore: adjustedScore,
-        manuallyAdjusted: aiScore !== adjustedScore,
-      })),
-      nlpDetectedTerms: sampleTerms,
-      qualitativeObservations: qualitativeNotes,
-    };
+    const jsonPayload = buildEvaluationPayload();
 
     try {
       const response = await fetch(
@@ -313,7 +416,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
-      {/* Encabezado + KPIs rápidos */}
+      {/* Encabezado + KPIs rápidos + Descarga de rúbrica */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
           <h2 className="text-2xl font-bold text-white">Consolidado de Evaluación</h2>
@@ -321,13 +424,20 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
             Guía de Observación UNIVO · Escala E / MB / B / R / NM + Reporte Cuantitativo y PNL
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-emerald-400 border border-emerald-500/30">
             Promedio: {metrics.avgScore}%
           </span>
           <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-900 text-slate-300 border border-slate-700">
             {sessionId}
           </span>
+          <button
+            type="button"
+            onClick={handleDownloadRubric}
+            className="text-xs px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 font-medium border border-emerald-500/40 transition-colors cursor-pointer"
+          >
+            Descargar Rúbrica
+          </button>
         </div>
       </div>
 
@@ -414,6 +524,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       {/* Vista expandible opcional con componentes previos */}
       {showAdvancedViews && (
         <div className="space-y-4 pt-2">
+          <PerformanceMetricsChart
+            metrics={dimensions.map((item) => ({
+              indicator: item.title,
+              score: item.adjustedScore,
+              feedback: item.feedback,
+            }))}
+          />
           <HybridRubricEditor
             indicators={legacyIndicators}
             onScoreChange={handleScoreChange}
@@ -484,14 +601,24 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         />
 
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <button
-            type="button"
-            onClick={handleSaveEvaluation}
-            disabled={isSaving}
-            className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
-          >
-            {isSaving ? "Guardando en S3..." : "Guardar Evaluación Consolidada"}
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleSaveEvaluation}
+              disabled={isSaving}
+              className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
+            >
+              {isSaving ? "Guardando en S3..." : "Guardar Evaluación Consolidada"}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDownloadRubric}
+              className="px-4 py-2.5 rounded-lg border border-emerald-500/40 bg-slate-950 hover:bg-slate-800 text-emerald-300 font-medium text-sm transition-colors cursor-pointer"
+            >
+              Descargar Rúbrica
+            </button>
+          </div>
 
           {statusMessage && (
             <span

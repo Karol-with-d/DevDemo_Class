@@ -7,22 +7,34 @@ interface Props {
 
 export const NLPVocabularyViewer: React.FC<Props> = ({ transcript, technicalTerms }) => {
   const renderHighlightedText = () => {
-    let parts: (string | React.ReactNode)[] = [transcript];
-    
+    let parts: React.ReactNode[] = [transcript];
+
     technicalTerms.forEach((term, termIndex) => {
-      parts = parts.flatMap((part, partIndex) => {
-        if (typeof part !== 'string') return part;
-        const regex = new RegExp(`(${term})`, 'gi');
-        return part.split(regex).map((chunk, i) => 
-          chunk.toLowerCase() === term.toLowerCase() ? (
-            <mark key={`term-${termIndex}-${partIndex}-${i}`} className="bg-emerald-500/20 text-emerald-300 px-1 py-0.5 rounded border border-emerald-500/40 font-semibold">
-              {chunk}
-            </mark>
-          ) : chunk
-        );
+      const next: React.ReactNode[] = [];
+      parts.forEach((part, partIndex) => {
+        if (typeof part !== "string") {
+          next.push(part);
+          return;
+        }
+        const regex = new RegExp(`(${term})`, "gi");
+        part.split(regex).forEach((chunk, i) => {
+          if (chunk.toLowerCase() === term.toLowerCase()) {
+            next.push(
+              <mark
+                key={`term-${termIndex}-${partIndex}-${i}`}
+                className="bg-emerald-500/20 text-emerald-300 px-1 py-0.5 rounded border border-emerald-500/40 font-semibold"
+              >
+                {chunk}
+              </mark>
+            );
+          } else if (chunk) {
+            next.push(chunk);
+          }
+        });
       });
+      parts = next;
     });
-    
+
     return parts;
   };
 
