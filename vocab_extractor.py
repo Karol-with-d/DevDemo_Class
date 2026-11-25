@@ -145,6 +145,41 @@ _MULETILLA_PATTERNS = (
     (r"\bmmm+\b", "mmm"),
 )
 
+SECTION_LABELS = {
+    "javascript": "JavaScript / TypeScript",
+    "react": "React / Next.js",
+    "node": "Node.js / Express",
+    "python": "Python",
+    "fastapi": "FastAPI",
+    "general": "General",
+}
+
+_TERM_SECTION = {}
+_TERM_SECTION.update({key: "python" for key in _PYTHON_TERMS})
+_TERM_SECTION.update({key: "javascript" for key in _JS_TERMS})
+_TERM_SECTION.update({key: "general" for key in _GENERIC_TERMS})
+_TERM_SECTION.update(
+    {
+        "fastapi": "fastapi",
+        "pydantic": "fastapi",
+        "uvicorn": "fastapi",
+        "react": "react",
+        "next.js": "react",
+        "componente": "react",
+        "props": "react",
+        "estado": "react",
+        "hook": "react",
+        "redux": "react",
+        "tsx": "react",
+        "node": "node",
+        "express": "node",
+        "npm": "node",
+        "jwt": "node",
+        "cors": "node",
+        "localstorage": "node",
+    }
+)
+
 
 def _fold(text: str) -> str:
     nfkd = unicodedata.normalize("NFKD", text or "")
@@ -214,12 +249,14 @@ def extract_technical_terms(text: str, technology: str = ""):
     hits = {}
 
     for folded_alias, canonical, alias in aliases:
-        pattern = r"(?<![a-z0-9_])" + re.escape(folded_alias) + r"(?![a-z0-9_])"
+        boundary = r"[a-z0-9_.]" if len(folded_alias) <= 2 else r"[a-z0-9_]"
+        pattern = rf"(?<!{boundary})" + re.escape(folded_alias) + r"(?![a-z0-9_])"
         if re.search(pattern, folded_text):
             hits[canonical] = {
                 "term": canonical,
                 "lemma": alias,
                 "category": "glossary",
+                "section": _TERM_SECTION.get(canonical, "general"),
             }
 
     nlp = _load_nlp()
@@ -247,6 +284,7 @@ def extract_technical_terms(text: str, technology: str = ""):
                 "term": canonical,
                 "lemma": token.text,
                 "category": category,
+                "section": _TERM_SECTION.get(canonical, "general"),
             }
 
     return sorted(hits.values(), key=lambda item: item["term"])

@@ -14,6 +14,7 @@ export interface TechnicalTerm {
   term: string;
   lemma?: string;
   category?: string;
+  section?: string;
 }
 
 export interface TranscriptSaveResult {

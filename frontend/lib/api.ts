@@ -16,6 +16,7 @@ export type TechnicalTerm = {
   term: string;
   lemma?: string;
   category?: string;
+  section?: string;
 };
 
 export type TranscriptSegment = {

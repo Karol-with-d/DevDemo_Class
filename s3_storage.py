@@ -135,8 +135,10 @@ def read_evaluation_json(session_id):
     try:
         obj = client.get_object(Bucket=settings["bucket"], Key=key)
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404"):
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        # Missing objects often come back as AccessDenied if the IAM user
+        # cannot ListBucket. That is not a failed rubric load.
+        if code in ("NoSuchKey", "404", "AccessDenied", "403"):
             return None
         raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
     except BotoCoreError as exc:
