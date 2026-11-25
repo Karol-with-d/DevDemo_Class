@@ -15,3 +15,5 @@ __pycache__/
 
 # Applicant speech captured during a recording (repo root only)
 /recordings/
+node_modules
+.next/ 
