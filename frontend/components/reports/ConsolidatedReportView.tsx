@@ -813,11 +813,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         )}
         <HybridRubricEditor
           indicators={alwaysVisibleIndicators}
-          onScoreChange={handleScoreChange}
+          onScoreChange={(id, score) => handleScoreChange(id, score)}
         />
-        {hasTranscript && (
-          <TechnicalTranscript segments={segments} vocabulary={vocabulary} />
-        )}
       </div>
 
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
