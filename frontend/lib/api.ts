@@ -232,3 +232,18 @@ export async function deleteRecording(sessionId: string): Promise<void> {
     throw new Error(await errorMessage(response, "No se pudo eliminar la grabación."));
   }
 }
+
+export async function deleteCandidateFolder(candidateName: string): Promise<{
+  candidateName: string;
+  deletedSessionIds: string[];
+  deletedS3Keys: string[];
+}> {
+  const response = await fetch(
+    `${API_BASE}/candidates?name=${encodeURIComponent(candidateName)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "No se pudo eliminar la carpeta del candidato."));
+  }
+  return response.json();
+}
