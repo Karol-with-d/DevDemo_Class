@@ -23,6 +23,20 @@ def is_s3_configured():
     return all(os.getenv(name) for name in REQUIRED_ENV)
 
 
+def _env_flag(name):
+    return (os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allow_local_video_fallback():
+    """Opt-in local video storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_VIDEO_FALLBACK")
+
+
+def allow_local_evaluation_fallback():
+    """Opt-in local evaluation storage fallback when AWS S3 is not configured."""
+    return _env_flag("ALLOW_LOCAL_FALLBACK") or _env_flag("ALLOW_LOCAL_EVALUATION_FALLBACK")
+
+
 def _require_settings():
     missing = [name for name in REQUIRED_ENV if not os.getenv(name)]
     if missing:
@@ -95,6 +109,139 @@ def read_video_object(key):
     return body, content_type
 
 
+def _client_error_code(exc):
+    if isinstance(exc, ClientError):
+        return str(exc.response.get("Error", {}).get("Code", ""))
+    return ""
+
+
+def _is_access_denied(exc):
+    code = _client_error_code(exc)
+    text = str(exc).lower()
+    return code in {"AccessDenied", "403", "AllAccessDisabled"} or "accessdenied" in text or "not authorized" in text
+
+
+def list_objects_under_prefix(prefix):
+    """Lista keys bajo recordings/{session}/. None si IAM no tiene s3:ListBucket."""
+    raw = str(prefix or "")
+    if not raw.startswith("recordings/") or ".." in raw:
+        raise RuntimeError("Prefijo de S3 no válido.")
+    settings = _require_settings()
+    client = _client(settings["region"])
+    keys = []
+    token = None
+    try:
+        while True:
+            kwargs = {"Bucket": settings["bucket"], "Prefix": raw, "MaxKeys": 1000}
+            if token:
+                kwargs["ContinuationToken"] = token
+            response = client.list_objects_v2(**kwargs)
+            for item in response.get("Contents") or []:
+                key = item.get("Key")
+                if key:
+                    keys.append(key)
+            if not response.get("IsTruncated"):
+                break
+            token = response.get("NextContinuationToken")
+            if not token:
+                break
+    except ClientError as exc:
+        if _is_access_denied(exc):
+            print(
+                "[WARN] s3:ListBucket denegado; se borran las keys conocidas "
+                "(videoKey y evaluation.json).",
+                flush=True,
+            )
+            return None
+        raise RuntimeError(f"Error de S3 al listar objetos: {exc}") from exc
+    except BotoCoreError as exc:
+        raise RuntimeError(f"Error de S3 al listar objetos: {exc}") from exc
+    return keys
+
+
+def delete_object_keys(keys):
+    """Borra keys recordings/* en lotes de 1000. Requiere s3:DeleteObject."""
+    unique = []
+    seen = set()
+    for key in keys:
+        raw = str(key or "")
+        if not raw.startswith("recordings/") or raw in seen:
+            continue
+        seen.add(raw)
+        unique.append(raw)
+    if not unique:
+        return []
+
+    settings = _require_settings()
+    client = _client(settings["region"])
+    deleted = []
+    for index in range(0, len(unique), 1000):
+        batch = unique[index : index + 1000]
+        try:
+            response = client.delete_objects(
+                Bucket=settings["bucket"],
+                Delete={"Objects": [{"Key": key} for key in batch], "Quiet": False},
+            )
+        except ClientError as exc:
+            if _is_access_denied(exc):
+                raise RuntimeError(
+                    "IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar."
+                ) from exc
+            raise RuntimeError(f"Error de S3 al borrar objetos: {exc}") from exc
+        except BotoCoreError as exc:
+            raise RuntimeError(f"Error de S3 al borrar objetos: {exc}") from exc
+
+        errors = response.get("Errors") or []
+        if errors:
+            first = errors[0]
+            code = str(first.get("Code") or "")
+            key = first.get("Key") or ""
+            message = first.get("Message") or code
+            if code in {"AccessDenied", "403"} or "access" in str(message).lower():
+                raise RuntimeError(
+                    "IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar."
+                )
+            raise RuntimeError(f"Error de S3 al borrar {key}: {message}")
+        deleted.extend(
+            item.get("Key") for item in (response.get("Deleted") or []) if item.get("Key")
+        )
+    return deleted
+
+
+def delete_session_objects(session_id, extra_keys=None):
+    """Elimina lo de una sesión en S3. Si hay ListBucket, borra el prefijo completo;
+    si no, borra videoKey + evaluation.json (DeleteObject no exige listar)."""
+    session = safe_session_id(session_id)
+    prefix = f"recordings/{session}/"
+    listed = list_objects_under_prefix(prefix)
+    keys = set(listed or [])
+    keys.add(f"{prefix}evaluation.json")
+    for key in extra_keys or []:
+        raw = str(key or "")
+        parts = raw.split("/")
+        if raw.startswith(prefix) or (len(parts) >= 2 and parts[0] == "recordings" and parts[1] == session):
+            keys.add(raw)
+    deleted = delete_object_keys(sorted(keys))
+    return {"prefix": prefix, "deletedKeys": deleted, "listed": listed is not None}
+
+
+def delete_video_object(key):
+    if not str(key).startswith("recordings/"):
+        raise RuntimeError("Clave de video no válida.")
+    settings = _require_settings()
+    client = _client(settings["region"])
+    try:
+        client.delete_object(Bucket=settings["bucket"], Key=key)
+    except ClientError as exc:
+        if _is_access_denied(exc):
+            raise RuntimeError(
+                "IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar."
+            ) from exc
+        raise RuntimeError(f"Error de S3: {exc}") from exc
+    except BotoCoreError as exc:
+        raise RuntimeError(f"Error de S3: {exc}") from exc
+
+
 def upload_evaluation_json(session_id, evaluation_data):
     """Guarda la rúbrica y el reporte cuantitativo en recordings/{session}/evaluation.json."""
     settings = _require_settings()
@@ -124,8 +271,10 @@ def read_evaluation_json(session_id):
     try:
         obj = client.get_object(Bucket=settings["bucket"], Key=key)
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404"):
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        # Missing objects often come back as AccessDenied if the IAM user
+        # cannot ListBucket. That is not a failed rubric load.
+        if code in ("NoSuchKey", "404", "AccessDenied", "403"):
             return None
         raise RuntimeError(f"Error de S3 al leer evaluación: {exc}") from exc
     except BotoCoreError as exc:
@@ -133,14 +282,3 @@ def read_evaluation_json(session_id):
 
     raw = obj["Body"].read().decode("utf-8")
     return json.loads(raw)
-
-
-def delete_video_object(key):
-    if not str(key).startswith("recordings/"):
-        raise RuntimeError("Clave de video no válida.")
-    settings = _require_settings()
-    client = _client(settings["region"])
-    try:
-        client.delete_object(Bucket=settings["bucket"], Key=key)
-    except (BotoCoreError, ClientError) as exc:
-        raise RuntimeError(f"Error de S3: {exc}") from exc

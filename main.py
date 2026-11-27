@@ -16,7 +16,7 @@ if __name__ == "__main__" and _port_is_open(HOST, PORT):
     print(f"Backend already running at http://{HOST}:{PORT}")
     raise SystemExit(0)
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 import asyncio
@@ -27,21 +27,26 @@ import time
 
 from live_caption import relay_live_transcription
 from local_video_storage import LOCAL_VIDEO_PREFIX, local_video_path, store_local_video
+from pose_analyzer import PoseSessionAnalyzer, run_mediapipe_detection
 from rubric import suggest_rubric
 from transcriber import (
     TranscriptSession,
     attach_evaluation_report,
     attach_video_key,
+    attach_video_metrics,
     delete_local_session,
     list_saved_recordings,
     load_session_record,
+    sessions_for_candidate,
     replace_session_transcript,
     safe_session_id,
     transcribe_recording_file,
     transcribe_speed_demo,
 )
 from s3_storage import (
-    delete_video_object,
+    allow_local_evaluation_fallback,
+    allow_local_video_fallback,
+    delete_session_objects,
     is_s3_configured,
     media_type_for,
     read_evaluation_json,
@@ -231,6 +236,8 @@ async def upload_video(
         "complexity": complexity,
     }
 
+    source = "local" if (not is_s3_configured() and allow_local_video_fallback()) else "s3"
+
     audio_bytes = None
     audio_filename = "audio.webm"
     audio_content_type = "audio/webm"
@@ -242,7 +249,7 @@ async def upload_video(
             audio_content_type = audio.content_type or "audio/webm"
 
     transcription_task = None
-    if audio_bytes:
+    if audio_bytes and (source == "local" or is_s3_configured()):
         # Start full-audio transcription right away so it overlaps with S3/disk storage.
         transcription_task = _schedule_final_transcription(
             session_id,
@@ -253,7 +260,6 @@ async def upload_video(
             duration_seconds=durationSeconds,
         )
 
-    source = "s3" if is_s3_configured() else "local"
     video_bytes = None
     try:
         if source == "s3":
@@ -329,12 +335,12 @@ async def save_evaluation(session_id: str, payload: dict):
     if not payload:
         raise HTTPException(status_code=400, detail="Los datos de evaluación están vacíos.")
 
-    source = "local"
+    use_local = (not is_s3_configured()) and allow_local_evaluation_fallback()
+    source = "local" if use_local else "s3"
     result = {"key": None, "savedInS3": False}
-    if is_s3_configured():
+    if source == "s3":
         try:
             result = await asyncio.to_thread(upload_evaluation_json, session_id, payload)
-            source = "s3"
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except Exception as exc:
@@ -364,8 +370,8 @@ async def get_evaluation(session_id: str):
         try:
             s3_evaluation = await asyncio.to_thread(read_evaluation_json, session_id)
         except RuntimeError as exc:
-            if not local_evaluation:
-                raise HTTPException(status_code=503, detail="No se pudo consultar la evaluación guardada.") from exc
+            print(f"[WARN] Evaluación S3 no disponible: {exc}")
+            s3_evaluation = None
 
     return {
         "ok": True,
@@ -373,6 +379,8 @@ async def get_evaluation(session_id: str):
         "evaluation": s3_evaluation if s3_evaluation is not None else local_evaluation,
         "segments": record.get("segments") or [],
         "vocabulary": record.get("vocabulary") or [],
+        "muletillas": record.get("muletillas") or {},
+        "videoMetrics": record.get("videoMetrics"),
     }
 
 
@@ -424,42 +432,112 @@ async def play_video(key: str, download: bool = False):
     )
 
 
-@app.delete("/recordings/{session_id}")
-async def delete_recording(session_id: str):
+def _s3_http_error(exc: Exception) -> HTTPException:
+    detail = str(exc)
+    lowered = detail.lower()
+    if "listbucket" in lowered or "deleteobject" in lowered or "accessdenied" in lowered or "not authorized" in lowered:
+        return HTTPException(status_code=403, detail=detail)
+    return HTTPException(status_code=502, detail=detail)
+
+
+async def _cancel_pending_transcription(session_id: str) -> None:
     pending_task = pending_transcriptions.pop(safe_session_id(session_id), None)
-    if pending_task is not None and not pending_task.done():
-        pending_task.cancel()
-        try:
-            await pending_task
-        except (asyncio.CancelledError, Exception):
-            pass
-    record = load_session_record(session_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
-    video_key = record.get("videoKey")
-    if video_key and video_key.startswith(LOCAL_VIDEO_PREFIX):
-        try:
-            local_video_path(video_key).unlink(missing_ok=True)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
-    elif video_key:
-        try:
-            await asyncio.to_thread(delete_video_object, video_key)
-        except RuntimeError as exc:
-            detail = str(exc)
-            if "AccessDenied" in detail or "not authorized" in detail.lower():
-                raise HTTPException(
-                    status_code=403,
-                    detail="IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar.",
-                ) from exc
-            raise HTTPException(status_code=502, detail=detail) from exc
+    if pending_task is None or pending_task.done():
+        return
+    pending_task.cancel()
+    try:
+        await pending_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+def _delete_local_video_if_needed(video_key) -> None:
+    if not video_key or not str(video_key).startswith(LOCAL_VIDEO_PREFIX):
+        return
+    local_video_path(video_key).unlink(missing_ok=True)
+
+
+async def _purge_session_s3(session_id: str, video_key) -> list[str]:
+    if not is_s3_configured():
+        return []
+    extra = [video_key] if video_key and str(video_key).startswith("recordings/") else []
+    try:
+        result = await asyncio.to_thread(delete_session_objects, session_id, extra)
+    except RuntimeError as exc:
+        raise _s3_http_error(exc) from exc
+    return result.get("deletedKeys") or []
+
+
+def _purge_session_local(session_id: str, video_key) -> None:
+    try:
+        _delete_local_video_if_needed(video_key)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
     try:
         delete_local_session(session_id)
     except OSError as exc:
         print(f"[WARN] No se vació del todo la carpeta local: {exc}")
     if load_session_record(session_id):
         raise HTTPException(status_code=500, detail="No se pudo quitar la sesión del historial.")
-    return {"ok": True, "sessionId": session_id}
+
+
+@app.delete("/recordings/{session_id}")
+async def delete_recording(session_id: str):
+    await _cancel_pending_transcription(session_id)
+    record = load_session_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
+    video_key = record.get("videoKey")
+    deleted_keys = await _purge_session_s3(session_id, video_key)
+    _purge_session_local(session_id, video_key)
+    return {"ok": True, "sessionId": session_id, "deletedS3Keys": deleted_keys}
+
+
+@app.delete("/candidates")
+async def delete_candidate_folder(name: str = Query(..., min_length=1)):
+    """Elimina todas las sesiones de un candidato: S3 (prefijo), rúbricas y carpeta local."""
+    sessions = sessions_for_candidate(name)
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay una carpeta de candidato con ese nombre en este equipo.",
+        )
+
+    deleted_keys: list[str] = []
+    if is_s3_configured():
+        for item in sessions:
+            deleted_keys.extend(await _purge_session_s3(item["sessionId"], item.get("videoKey")))
+
+    deleted_ids = []
+    local_errors = []
+    for item in sessions:
+        session_id = item["sessionId"]
+        await _cancel_pending_transcription(session_id)
+        try:
+            _purge_session_local(session_id, item.get("videoKey"))
+            deleted_ids.append(session_id)
+        except HTTPException as exc:
+            local_errors.append(f"{session_id}: {exc.detail}")
+
+    leftover = sessions_for_candidate(name)
+    if leftover or local_errors:
+        still = ", ".join(item["sessionId"] for item in leftover) or "ninguna"
+        extra = f" Detalle: {'; '.join(local_errors)}" if local_errors else ""
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Se borraron objetos en S3, pero no se pudo vaciar el historial local "
+                f"({still}).{extra}"
+            ),
+        )
+
+    return {
+        "ok": True,
+        "candidateName": sessions[0].get("candidateName") or name,
+        "deletedSessionIds": deleted_ids,
+        "deletedS3Keys": deleted_keys,
+        "s3": is_s3_configured(),
+    }
 
 
 @app.post("/demo/transcribe")
@@ -487,69 +565,12 @@ async def websocket_transcription(websocket: WebSocket):
     """Live subtitles. The browser streams PCM and this process talks to gpt-live-transcribe."""
     await relay_live_transcription(websocket)
 
-def _giro_desde_rostro(landmarks, matrix=None):
-    """Head turn from the face mesh. Finding a face is not the same as facing the camera."""
-    if matrix is not None:
-        # About 26 degrees. A profile like the screenshots is well past this.
-        yaw = math.atan2(float(matrix[0][2]), float(matrix[2][2]))
-        if abs(yaw) >= 0.45:
-            return "perfil"
-    if not landmarks or len(landmarks) < 455:
-        return None
-    nose = landmarks[1]
-    left_eye, right_eye = landmarks[33], landmarks[263]
-    left_cheek, right_cheek = landmarks[234], landmarks[454]
-    chin = landmarks[152]
-    width = max(abs(right_cheek.x - left_cheek.x), 1e-4)
-    yaw = abs(nose.x - (left_cheek.x + right_cheek.x) / 2.0) / width
-    depth = abs(left_cheek.z - right_cheek.z)
-    eye_span = max(abs(right_eye.x - left_eye.x), 1e-4)
-    pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / eye_span
-    if yaw >= 0.30 or depth >= 0.08 or (yaw >= 0.20 and depth >= 0.045):
-        return "perfil"
-    if pitch >= 2.0 or nose.y >= 0.86 or chin.y >= 0.97:
-        return "abajo"
-    return None
-
-
-def _giro_desde_pose(landmarks):
-    """Backup when the face mesh drops: profile ears, or the head sunk to the frame edge."""
-    if not landmarks or len(landmarks) < 9:
-        return None
-    nose = landmarks[0]
-    left_eye, right_eye = landmarks[2], landmarks[5]
-    left_ear, right_ear = landmarks[7], landmarks[8]
-    if nose.y >= 0.82 or (
-        left_eye.visibility > 0.3
-        and right_eye.visibility > 0.3
-        and left_eye.y >= 0.75
-        and right_eye.y >= 0.75
-    ):
-        return "abajo"
-    if left_eye.visibility > 0.3 and right_eye.visibility > 0.3:
-        span = max(abs(left_eye.x - right_eye.x), 0.015)
-        pitch = (nose.y - (left_eye.y + right_eye.y) / 2.0) / span
-        if pitch >= 2.4:
-            return "abajo"
-    if left_ear.visibility > 0.45 and right_ear.visibility > 0.45 and nose.visibility > 0.35:
-        span = max(abs(left_ear.x - right_ear.x), 1e-4)
-        asym = abs(abs(nose.x - left_ear.x) - abs(nose.x - right_ear.x)) / span
-        if asym >= 0.85:
-            return "perfil"
-    return None
-
-
-_MENSAJE_GIRO = {
-    "espaldas": ("¡Atención! De espaldas a la cámara", "Sin contacto visual (De espaldas)"),
-    "perfil": ("De perfil: no mira a la cámara", "Sin contacto visual (De perfil)"),
-    "abajo": ("Cabeza baja o fuera de cuadro", "Sin contacto visual (Cabeza baja)"),
-}
-
-
 @app.websocket("/ws/pose-analysis")
 async def websocket_pose_analysis(websocket: WebSocket):
     await websocket.accept()
-    print("[INFO] Cliente conectado via WebSocket")
+    raw_session_id = (websocket.query_params.get("sessionId") or "").strip()
+    session_id = safe_session_id(raw_session_id) if raw_session_id else None
+    print(f"[INFO] Cliente conectado via WebSocket (pose session={session_id or 'anon'})")
 
     if cv2 is None or np is None:
         print("[WARN] Análisis de pose omitido: OpenCV/MediaPipe no disponible")
@@ -572,255 +593,68 @@ async def websocket_pose_analysis(websocket: WebSocket):
             print("[INFO] Cliente desconectado del WebSocket")
         return
 
-    prev_center_x, prev_center_y = None, None
-    smooth_center_x, smooth_center_y = None, None
-    historial_movimiento = []
-    historial_espaldas = []
-    espalda_activa = False
-    motivo_sostenido = None
-    frames_sin_pose = 0
+    analyzer = PoseSessionAnalyzer()
     pose_frames = 0
     pose_slow = 0
-    VENTANA_FRAMES = 90
-    MIN_MUESTRAS_MOVIMIENTO = 30
-    # About three camera frames. One noisy frame must not raise the banner.
-    VENTANA_ESPALDAS = 4
-    # Pose landmarks jitter while the teacher stands still. Movement has to clear
-    # that noise, and a one-frame leap is a bad detection, not walking.
-    UMBRAL_MOVIMIENTO = 0.10
-    UMBRAL_SALTO = 0.65
-    SUAVIZADO = 0.35
+    saved_frames = 0
+
+    async def persist_metrics() -> None:
+        nonlocal saved_frames
+        if not session_id or pose_frames <= saved_frames:
+            return
+        summary = analyzer.summary()
+        if not summary:
+            return
+        try:
+            await asyncio.to_thread(attach_video_metrics, session_id, summary)
+            saved_frames = pose_frames
+            print(
+                f"[INFO] Métricas de video guardadas ({session_id}): "
+                f"frames={summary['framesAnalyzed']} frente={summary['orientation']['facingCameraPct']}% "
+                f"contacto={summary['eyeContact']['directPct']}%",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[WARN] No se guardaron métricas de video ({session_id}): {exc}", flush=True)
 
     try:
         while True:
-            # Recibir fotograma binario de la cámara
-            bytes_data = await websocket.receive_bytes()
-            frame_started = time.perf_counter()
-            np_arr = np.frombuffer(bytes_data, np.uint8)
-            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
 
-            if frame is None:
+            text = message.get("text")
+            if text:
+                try:
+                    payload = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") == "flush":
+                    await persist_metrics()
                 continue
 
-            h, w, _ = frame.shape
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            bytes_data = message.get("bytes")
+            if not bytes_data:
+                continue
 
-            # Ejecutar inferencia para pose y rostro
-            pose_result = pose_landmarker.detect(mp_image) if pose_landmarker else None
-            face_result = face_landmarker.detect(mp_image) if face_landmarker else None
+            frame_started = time.perf_counter()
 
-            # Valores por defecto
-            alerta_movilidad = "Analizando..."
-            alerta_gestos = "Buscando docente..."
-            color_alerta = "#9ca3af"
+            # Run JPEG decode + MediaPipe inference off the event loop so live audio
+            # transcription and HTTP requests are never blocked by camera frames.
+            detected = await asyncio.to_thread(
+                run_mediapipe_detection,
+                bytes_data,
+                cv2_mod=cv2,
+                np_mod=np,
+                mp_mod=mp,
+                pose_landmarker=pose_landmarker,
+                face_landmarker=face_landmarker,
+            )
+            if detected is None:
+                continue
 
-            alerta_orientacion = "Buscando docente..."
-            color_orientacion = "#9ca3af"
-            es_de_espaldas = False
-            alerta_expresion = "Buscando rostro..."
-            alerta_contacto = "Buscando rostro..."
-            color_contacto = "#9ca3af"
-
-            pose_detected = pose_result and pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0
-            face_detected = face_result and face_result.face_landmarks and len(face_result.face_landmarks) > 0
-            frame_de_espaldas = False
-
-            if pose_detected:
-                landmarks = pose_result.pose_landmarks[0]
-
-                # Puntos anatómicos principales
-                nose = landmarks[0]
-                left_ear, right_ear = landmarks[7], landmarks[8]
-                shoulder_left, shoulder_right = landmarks[11], landmarks[12]
-                wrist_left, wrist_right = landmarks[15], landmarks[16]
-                hip_left, hip_right = landmarks[23], landmarks[24]
-
-                # --- 1. DETECCIÓN DE ORIENTACIÓN: DAR LA ESPALDA A LA CÁMARA ---
-                shoulders_visible = (shoulder_left.visibility > 0.35 and shoulder_right.visibility > 0.35)
-                # En vista frontal: shoulder_left.x > shoulder_right.x
-                # De espaldas: shoulder_left.x < shoulder_right.x (inversión de hombros)
-                shoulder_diff = shoulder_left.x - shoulder_right.x
-
-                # Comprobación de profundidad relativa de la nariz
-                nose_behind_ears = (nose.z > left_ear.z and nose.z > right_ear.z) or (nose.visibility < 0.25)
-
-                if shoulders_visible and shoulder_diff < -0.04:
-                    frame_de_espaldas = True
-                elif (not face_detected) and nose_behind_ears and shoulders_visible:
-                    frame_de_espaldas = True
-
-                # --- 2. EVALUACIÓN DE GESTOS ---
-                altura_cadera = (hip_left.y + hip_right.y) / 2 if (hip_left.visibility > 0.3 and hip_right.visibility > 0.3) else 0.85
-                manos_elevadas = (wrist_left.visibility > 0.4 and wrist_left.y < altura_cadera) or \
-                                 (wrist_right.visibility > 0.4 and wrist_right.y < altura_cadera)
-                alerta_gestos = "Buen uso de gesticulación" if manos_elevadas else "Gestos limitados (Manos bajas)"
-
-                # --- 3. EVALUACIÓN DE MOVILIDAD ---
-                frames_sin_pose = 0
-                hombros_confiables = shoulder_left.visibility > 0.5 and shoulder_right.visibility > 0.5
-                ancho_hombros = max(math.hypot((shoulder_left.x - shoulder_right.x) * w, (shoulder_left.y - shoulder_right.y) * h), 1.0)
-                center_x = ((shoulder_left.x + shoulder_right.x) / 2) * w
-                center_y = ((shoulder_left.y + shoulder_right.y) / 2) * h
-
-                if hombros_confiables:
-                    if smooth_center_x is None or prev_center_x is None:
-                        smooth_center_x, smooth_center_y = center_x, center_y
-                        prev_center_x, prev_center_y = center_x, center_y
-                    else:
-                        candidato_x = SUAVIZADO * center_x + (1.0 - SUAVIZADO) * smooth_center_x
-                        candidato_y = SUAVIZADO * center_y + (1.0 - SUAVIZADO) * smooth_center_y
-                        desplazamiento_relativo = math.hypot(
-                            candidato_x - prev_center_x, candidato_y - prev_center_y
-                        ) / ancho_hombros
-
-                        if desplazamiento_relativo >= UMBRAL_SALTO:
-                            smooth_center_x, smooth_center_y = center_x, center_y
-                            prev_center_x, prev_center_y = center_x, center_y
-                        else:
-                            smooth_center_x, smooth_center_y = candidato_x, candidato_y
-                            prev_center_x, prev_center_y = candidato_x, candidato_y
-                            historial_movimiento.append(1 if desplazamiento_relativo > UMBRAL_MOVIMIENTO else 0)
-                            if len(historial_movimiento) > VENTANA_FRAMES:
-                                historial_movimiento.pop(0)
-
-                if len(historial_movimiento) >= MIN_MUESTRAS_MOVIMIENTO:
-                    movimiento_promedio = sum(historial_movimiento) / len(historial_movimiento)
-
-                    if movimiento_promedio > 0.40:
-                        alerta_movilidad = "Excelente dinamismo corporal"
-                        color_alerta = "#22c55e" # Verde
-                    elif movimiento_promedio > 0.15:
-                        alerta_movilidad = "Movilidad moderada"
-                        color_alerta = "#eab308" # Amarillo
-                    else:
-                        alerta_movilidad = "Docente muy estático"
-                        color_alerta = "#ef4444" # Rojo
-                else:
-                    alerta_movilidad = "Analizando movilidad..."
-                    color_alerta = "#9ca3af"
-            else:
-                frames_sin_pose += 1
-                if frames_sin_pose > 8:
-                    prev_center_x, prev_center_y = None, None
-                    smooth_center_x, smooth_center_y = None, None
-                    historial_movimiento.clear()
-                    if not face_detected:
-                        historial_espaldas.clear()
-                        espalda_activa = False
-                        motivo_sostenido = None
-
-            # A face mesh used to force "facing the audience". Profile and a head
-            # dropped to the bottom of the frame are the cases that must alert.
-            matriz_rostro = None
-            if face_detected and getattr(face_result, "facial_transformation_matrixes", None):
-                matriz_rostro = face_result.facial_transformation_matrixes[0]
-            giro_rostro = _giro_desde_rostro(face_result.face_landmarks[0], matriz_rostro) if face_detected else None
-            giro_pose = _giro_desde_pose(landmarks) if pose_detected else None
-            if frame_de_espaldas:
-                motivo_frame = "espaldas"
-            elif giro_rostro:
-                motivo_frame = giro_rostro
-            elif giro_pose:
-                motivo_frame = giro_pose
-            else:
-                motivo_frame = None
-
-            if pose_detected or face_detected:
-                historial_espaldas.append(1 if motivo_frame else 0)
-                if len(historial_espaldas) > VENTANA_ESPALDAS:
-                    historial_espaldas.pop(0)
-                votos_espaldas = sum(historial_espaldas)
-                if not espalda_activa and len(historial_espaldas) >= 3 and votos_espaldas >= 3:
-                    espalda_activa = True
-                elif espalda_activa and votos_espaldas <= 1:
-                    espalda_activa = False
-                    if not motivo_frame:
-                        motivo_sostenido = None
-                if motivo_frame:
-                    motivo_sostenido = motivo_frame
-
-            motivo_visible = motivo_frame or (motivo_sostenido if espalda_activa else None)
-            if espalda_activa and motivo_visible:
-                es_de_espaldas = True
-                alerta_orientacion = _MENSAJE_GIRO[motivo_visible][0]
-                color_orientacion = "#ef4444"
-            elif motivo_visible == "perfil":
-                alerta_orientacion = "De perfil (Giro parcial)"
-                color_orientacion = "#eab308"
-            elif motivo_visible == "abajo":
-                alerta_orientacion = "Cabeza baja o fuera de cuadro"
-                color_orientacion = "#eab308"
-            elif motivo_visible == "espaldas":
-                alerta_orientacion = "Girando de espaldas..."
-                color_orientacion = "#eab308"
-            elif face_detected or pose_detected:
-                alerta_orientacion = "Frente a la audiencia"
-                color_orientacion = "#22c55e"
-
-            # --- 4. MÉTRICAS FACIALES Y CONTACTO VISUAL ---
-            if motivo_visible:
-                alerta_contacto = _MENSAJE_GIRO[motivo_visible][1]
-                color_contacto = "#ef4444" if espalda_activa else "#eab308"
-                if motivo_visible == "espaldas":
-                    alerta_expresion = "No visible (De espaldas)"
-            if motivo_visible != "espaldas" and face_detected and face_result.face_blendshapes and len(face_result.face_blendshapes) > 0:
-                blendshapes = {b.category_name: b.score for b in face_result.face_blendshapes[0]}
-
-                # Sonrisa y amabilidad
-                smile_score = (blendshapes.get("mouthSmileLeft", 0) + blendshapes.get("mouthSmileRight", 0)) / 2.0
-                if smile_score > 0.20:
-                    alerta_expresion = "Expresión cordial / Sonrisa"
-                else:
-                    alerta_expresion = "Expresión atenta / Neutral"
-
-                # Parpadeo / Ojos cerrados
-                ojos_cerrados = blendshapes.get("eyeBlinkLeft", 0) > 0.65 and blendshapes.get("eyeBlinkRight", 0) > 0.65
-
-                # Mirada lateral coordinada (ambos ojos mirando marcadamente a un lado)
-                mira_izq = blendshapes.get("eyeLookOutLeft", 0) > 0.55 and blendshapes.get("eyeLookInRight", 0) > 0.55
-                mira_der = blendshapes.get("eyeLookOutRight", 0) > 0.55 and blendshapes.get("eyeLookInLeft", 0) > 0.55
-                mira_arriba = blendshapes.get("eyeLookUpLeft", 0) > 0.65 and blendshapes.get("eyeLookUpRight", 0) > 0.65
-                mira_abajo = blendshapes.get("eyeLookDownLeft", 0) > 0.75 and blendshapes.get("eyeLookDownRight", 0) > 0.75
-
-                if not motivo_visible:
-                    if ojos_cerrados:
-                        alerta_contacto = "Ojos cerrados"
-                        color_contacto = "#eab308" # Amarillo
-                    elif mira_izq or mira_der or mira_arriba or mira_abajo:
-                        alerta_contacto = "Mirada desviada"
-                        color_contacto = "#eab308" # Amarillo
-                    else:
-                        alerta_contacto = "Contacto visual directo"
-                        color_contacto = "#22c55e" # Verde
-            elif motivo_visible:
-                pass
-            elif pose_detected:
-                # Fallback con Pose Landmarker (cuando FaceLandmarker no detecta por distancia o luz)
-                eye_left, eye_right = landmarks[2], landmarks[5]
-                nose = landmarks[0]
-                ojos_visibles = (eye_left.visibility > 0.35 and eye_right.visibility > 0.35 and nose.visibility > 0.35)
-
-                if ojos_visibles:
-                    mid_eye_x = (eye_left.x + eye_right.x) / 2.0
-                    ancho_ojos = max(abs(eye_left.x - eye_right.x), 0.005)
-                    desviacion_nariz = abs(nose.x - mid_eye_x) / ancho_ojos
-
-                    if desviacion_nariz < 0.35:
-                        alerta_contacto = "Contacto visual directo"
-                        color_contacto = "#22c55e" # Verde
-                    else:
-                        alerta_contacto = "Mirada lateral / Giro de cabeza"
-                        color_contacto = "#eab308" # Amarillo
-                    alerta_expresion = "Expresión atenta"
-                else:
-                    alerta_contacto = "Rostro parcialmente cubierto"
-                    color_contacto = "#eab308"
-                    alerta_expresion = "Expresión no disponible"
-            else:
-                alerta_contacto = "Sin contacto visual"
-                color_contacto = "#9ca3af"
-                alerta_expresion = "Rostro no detectado"
+            w, h, pose_result, face_result = detected
+            metrics = analyzer.analyze(pose_result, face_result, w, h)
 
             pose_ms = int(round((time.perf_counter() - frame_started) * 1000))
             pose_frames += 1
@@ -832,23 +666,14 @@ async def websocket_pose_analysis(websocket: WebSocket):
                     flush=True,
                 )
 
-            # Emitir métricas completas actualizadas a la web
-            await websocket.send_json({
-                "movilidad": alerta_movilidad,
-                "gesticulacion": alerta_gestos,
-                "status_color": color_alerta,
-                "orientacion": alerta_orientacion,
-                "orientacion_color": color_orientacion,
-                "de_espaldas": es_de_espaldas,
-                "expresion": alerta_expresion,
-                "contacto_visual": alerta_contacto,
-                "contacto_visual_color": color_contacto
-            })
+            await websocket.send_json(metrics)
 
     except WebSocketDisconnect:
         print("[INFO] Cliente desconectado del WebSocket")
     except Exception as e:
         print(f"[ERROR] Error en WebSocket: {e}")
+    finally:
+        await persist_metrics()
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,18 +1,22 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { evaluateVocabLevel } from "../../lib/vocabLevel";
 import { HybridRubricEditor, RubricIndicator } from "./HybridRubricEditor";
 import {
   getEvaluation,
   getRubricSuggestions,
   saveEvaluation,
+  type MuletillasSummary,
   type RubricSuggestion,
   type TechnicalTerm,
   type TranscriptSegment,
+  type VideoMetrics,
 } from "../../lib/api";
 import rubric from "../../lib/univo-rubric.json";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import { PerformanceMetricsChart } from "./PerformanceMetricsChart";
+import { VideoMetricsPanel } from "./VideoMetricsPanel";
 
 export type UnivoScale = "E" | "MB" | "B" | "R" | "NM";
 export type VerdictOption =
@@ -39,6 +43,8 @@ interface ConsolidatedReportViewProps {
   evaluatorName?: string;
   technology?: string;
   complexity?: string;
+  initialSegments?: TranscriptSegment[];
+  initialVocabulary?: TechnicalTerm[];
 }
 
 const SCALE_OPTIONS: { code: UnivoScale; label: string; score: number }[] = [
@@ -137,11 +143,13 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   evaluatorName = "",
   technology = "",
   complexity = "",
+  initialSegments = [],
+  initialVocabulary = [],
 }) => {
   const [dimensions, setDimensions] =
     useState<DimensionItem[]>(INITIAL_DIMENSIONS);
   const [qualitativeNotes, setQualitativeNotes] = useState("");
-  const [savedPayload, setSavedPayload] = useState<string | null>(null);
+  const [evaluationSaved, setEvaluationSaved] = useState(false);
   const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
@@ -151,9 +159,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   const [segments, setSegments] = useState<TranscriptSegment[]>([]);
   const [vocabulary, setVocabulary] = useState<TechnicalTerm[]>([]);
-  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
-    "loading"
-  );
+  const [muletillas, setMuletillas] = useState<MuletillasSummary | null>(null);
+  const [videoMetrics, setVideoMetrics] = useState<VideoMetrics | null>(null);
+  const [loadState, setLoadState] = useState<"loading" | "ready" | "error">("loading");
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [suggesting, setSuggesting] = useState(false);
   const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
@@ -191,12 +199,16 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       try {
         context = await getEvaluation(sessionId, signal);
       } catch {
-        if (!signal.aborted) {
-          setStatusMessage({
-            type: "info",
-            text: "No se pudo consultar una evaluación previa (el servidor respondió con error). Puedes calificar manualmente.",
-          });
-          setLoadState("ready");
+        if (signal.aborted) return;
+        setSegments(initialSegments);
+        setVocabulary(initialVocabulary);
+        setStatusMessage({
+          type: "info",
+          text: "No se pudo consultar una evaluación previa (el servidor respondió con error). Puedes calificar manualmente.",
+        });
+        setLoadState("ready");
+        if (autoSuggest && initialSegments.some(({ text }) => text.trim())) {
+          await requestSuggestions(signal);
         }
         return;
       }
@@ -204,6 +216,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
       setSegments(context.segments);
       setVocabulary(context.vocabulary);
+      setMuletillas(context.muletillas ?? null);
+      setVideoMetrics(context.videoMetrics ?? null);
       const saved = context.evaluation;
       if (saved) {
         const scores = Array.isArray(saved.rubricScores)
@@ -235,7 +249,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         if (typeof saved.qualitativeObservations === "string") {
           setQualitativeNotes(saved.qualitativeObservations);
         }
-        setSavedPayload(JSON.stringify(saved, null, 2));
+        setEvaluationSaved(true);
         setSavedLocation(
           context.source === "s3" ? "en AWS S3" : "en este equipo"
         );
@@ -243,11 +257,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       }
 
       setLoadState("ready");
-      if (
-        !saved &&
-        autoSuggest &&
-        context.segments.some(({ text }) => text.trim())
-      ) {
+      const hasEvidence =
+        context.segments.some(({ text }) => text.trim()) || Boolean(context.videoMetrics);
+      if (!saved && autoSuggest && hasEvidence) {
         await requestSuggestions(signal);
       }
     }
@@ -308,7 +320,12 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   );
 
   const hasTranscript = segments.some(({ text }) => text.trim());
+  const hasAnalysisData = hasTranscript || Boolean(videoMetrics);
   const terms = vocabulary.map(({ term }) => term);
+  const vocabGate = useMemo(
+    () => evaluateVocabLevel(complexity, vocabulary.length),
+    [complexity, vocabulary.length],
+  );
 
   const buildEvaluationPayload = () => ({
     sessionId,
@@ -322,7 +339,11 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       averageScore: metrics.avgScore,
       scaleDistribution: metrics.counts,
       nlpTermsCount: terms.length,
+      vocabLevelMet: vocabGate.ok,
+      vocabLevelRule: vocabGate.rule,
     },
+    videoMetrics,
+    muletillas,
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
       ({
@@ -592,7 +613,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       const result = await saveEvaluation(sessionId, jsonPayload);
 
       const location = result.source === "s3" ? "en AWS S3" : "en este equipo";
-      setSavedPayload(JSON.stringify(jsonPayload, null, 2));
+      setEvaluationSaved(true);
       setSuggestionsLoaded(true);
       setSavedLocation(location);
       setStatusMessage({
@@ -661,6 +682,28 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
+      <div
+        className={`rounded-xl border p-4 text-sm ${
+          vocabGate.ok
+            ? "border-emerald-500/40 bg-emerald-950/40 text-emerald-200"
+            : "border-amber-500/40 bg-amber-950/30 text-amber-200"
+        }`}
+      >
+        <p className="font-semibold">
+          Análisis PNL · {complexity || "Básico"} · {vocabGate.count} términos
+        </p>
+        <p className="mt-1 text-xs opacity-90">{vocabGate.message}</p>
+      </div>
+
+      {hasTranscript && (
+        <TechnicalTranscript
+          segments={segments}
+          vocabulary={vocabulary}
+          muletillas={muletillas}
+        />
+      )}
+
+      {/* Barra de resumen cuantitativo + vista detalle */}
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="text-slate-400 mr-1">Distribución:</span>
@@ -676,33 +719,15 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         </div>
       </div>
 
+      <VideoMetricsPanel videoMetrics={videoMetrics} muletillas={muletillas} />
+
       <div className="space-y-2 text-sm text-slate-300">
-        <p>
-          Revisa las sugerencias y completa las dimensiones pendientes antes de
-          usar el resultado.
-        </p>
-        {!hasTranscript && (
-          <p>
-            No hay una transcripción guardada. Puedes calificar la sesión
-            manualmente.
-          </p>
-        )}
-        {suggesting && (
-          <p role="status">
-            Generando sugerencias a partir de la transcripción…
-          </p>
-        )}
-        {suggestionError && (
-          <p role="alert" className="text-rose-400">
-            {suggestionError}
-          </p>
-        )}
-        {hasTranscript && !suggesting && !suggestionsLoaded && !savedPayload && (
-          <button
-            type="button"
-            className="text-emerald-300 underline"
-            onClick={() => void requestSuggestions()}
-          >
+        <p>Revisa las sugerencias y completa las dimensiones pendientes antes de usar el resultado.</p>
+        {!hasAnalysisData && <p>No hay una transcripción ni métricas de video guardadas. Puedes calificar la sesión manualmente.</p>}
+        {suggesting && <p role="status">Generando sugerencias a partir de la transcripción y el análisis de video…</p>}
+        {suggestionError && <p role="alert" className="text-rose-400">{suggestionError}</p>}
+        {hasAnalysisData && !suggesting && !suggestionsLoaded && !evaluationSaved && (
+          <button type="button" className="text-emerald-300 underline" onClick={() => void requestSuggestions()}>
             {suggestionError ? "Reintentar sugerencias" : "Generar sugerencias"}
           </button>
         )}
@@ -894,14 +919,77 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           )}
         </div>
 
-        {savedPayload && (
-          <div className="mt-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
-            <p className="text-xs text-slate-400 mb-2 font-mono">
-              Evaluación guardada {savedLocation}
-            </p>
-            <pre className="text-xs text-emerald-300 overflow-x-auto">
-              {savedPayload}
-            </pre>
+        {evaluationSaved && (
+          <div className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-300">Vista previa de la rúbrica</p>
+                <p className="text-xs text-slate-400">
+                  Evaluación guardada {savedLocation}. Este es el mismo cuadro que se descarga o imprime en PDF.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleDownloadRubricPdf()}
+                className="rounded-lg border border-emerald-500/40 bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-800"
+              >
+                Descargar Rúbrica (PDF)
+              </button>
+            </div>
+            <div className="overflow-x-auto p-4">
+              <div className="mb-3 flex flex-wrap gap-2 text-[11px] text-slate-300">
+                <span className="rounded-md border border-slate-800 px-2 py-1">
+                  Promedio: <strong>{formatScore(metrics.avgScore)}</strong>
+                </span>
+                <span className="rounded-md border border-slate-800 px-2 py-1">
+                  Dictamen: <strong>{computedVerdict ?? "Pendiente"}</strong>
+                </span>
+                <span className="rounded-md border border-slate-800 px-2 py-1 font-mono">
+                  E:{metrics.counts.E} · MB:{metrics.counts.MB} · B:{metrics.counts.B} · R:{metrics.counts.R} · NM:{metrics.counts.NM}
+                </span>
+              </div>
+              <table className="w-full min-w-[36rem] border-collapse text-left text-xs text-slate-200">
+                <thead>
+                  <tr className="bg-slate-900 text-slate-300">
+                    <th className="border border-slate-800 px-3 py-2 font-semibold">Dimensión</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">IA</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">Puntaje final</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">Escala</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dimensions.map((item) => (
+                    <tr key={item.id}>
+                      <td className="border border-slate-800 px-3 py-2 align-top">
+                        <p className="font-semibold text-white">{item.title}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-500">{item.univoScope}</p>
+                        {item.feedback ? (
+                          <p className="mt-1 text-slate-400">{item.feedback}</p>
+                        ) : null}
+                        {item.evidence ? (
+                          <p className="mt-0.5 italic text-slate-500">«{item.evidence}»</p>
+                        ) : null}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center">
+                        {item.aiScore === null ? "Sin sugerencia" : formatScore(item.aiScore)}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center font-bold text-emerald-300">
+                        {formatScore(item.adjustedScore)}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center font-bold">
+                        {item.scale ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {qualitativeNotes.trim() ? (
+                <p className="mt-3 text-xs text-slate-400">
+                  <span className="font-semibold text-slate-300">Observaciones: </span>
+                  {qualitativeNotes}
+                </p>
+              ) : null}
+            </div>
           </div>
         )}
       </div>

@@ -6,11 +6,10 @@
 // Contenedor de la "Auditoría de Sesión": pestañas de reporte, rúbrica y grabaciones.
 //
 // Dos modos de entrada:
-//  - Post-grabación (props session + transcript): muestra los datos reales de
-//    la sesión recién terminada; la pestaña Grabaciones lista todo el sistema.
-//  - Historial (prop recordings): se entra desde una tarjeta de
-//    EvaluationsOverview; reporte, rúbrica y grabaciones se alimentan del
-//    SavedRecording seleccionado de ese candidato.
+//  - Post-grabación (props session + transcript): transcripción real,
+//    vocabulario técnico y video; la pestaña Grabaciones lista el sistema.
+//  - Historial (prop recordings): EvaluationsOverview; reporte, rúbrica y
+//    grabaciones salen del SavedRecording del candidato.
 // ============================================================================
 
 import { useState } from "react";
@@ -46,6 +45,8 @@ function recordingToTranscript(rec: SavedRecording): TranscriptSaveResult {
   return {
     segments: (rec.segments ?? []).map((seg) => ({ ...seg, end: seg.end ?? seg.start })),
     vocabulary: rec.vocabulary ?? [],
+    muletillas: rec.muletillas,
+    videoMetrics: rec.videoMetrics ?? null,
     videoKey: rec.videoKey,
     videoUrl: rec.videoKey ? playbackUrlForKey(rec.videoKey) : null,
     jsonPath: null,

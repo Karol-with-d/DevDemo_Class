@@ -16,6 +16,7 @@ export type TechnicalTerm = {
   term: string;
   lemma?: string;
   category?: string;
+  section?: string;
 };
 
 export type TranscriptSegment = {
@@ -25,6 +26,55 @@ export type TranscriptSegment = {
 };
 
 export type VideoStorage = "s3" | "local";
+
+export type VideoIncident = {
+  type: string;
+  label: string;
+  startSec: number;
+  endSec: number;
+  durationSec: number;
+};
+
+export type VideoMetrics = {
+  framesAnalyzed: number;
+  durationAnalyzedSec: number;
+  personDetectedPct: number;
+  orientation: {
+    facingCameraPct: number;
+    profilePct: number;
+    backTurnedPct: number;
+    headDownPct: number;
+  };
+  eyeContact: {
+    directPct: number;
+    gazeAwayPct: number;
+    eyesClosedPct: number;
+    lostDueToTurnPct: number;
+  };
+  expression: {
+    cordialPct: number;
+    neutralPct: number;
+  };
+  mobility: {
+    activePct: number;
+    level: string;
+  };
+  gestures: {
+    visiblePct: number;
+    activeWhenVisiblePct: number;
+    handsMostlyOutOfFrame: boolean;
+    level: string;
+  };
+  incidents: VideoIncident[];
+};
+
+export type MuletillasSummary = {
+  total?: number;
+  totalWords?: number;
+  ratioPct?: number;
+  breakdown?: Record<string, number>;
+  items?: { phrase: string; count: number }[];
+};
 
 export type SavedRecording = {
   sessionId: string;
@@ -38,6 +88,8 @@ export type SavedRecording = {
   segmentCount: number;
   segments?: TranscriptSegment[];
   vocabulary?: TechnicalTerm[];
+  muletillas?: MuletillasSummary;
+  videoMetrics?: VideoMetrics | null;
 };
 
 export type RubricSuggestion = {
@@ -63,6 +115,8 @@ type EvaluationContext = {
   } | null;
   segments: TranscriptSegment[];
   vocabulary: TechnicalTerm[];
+  muletillas?: MuletillasSummary;
+  videoMetrics?: VideoMetrics | null;
 };
 
 export async function getEvaluation(sessionId: string, signal?: AbortSignal): Promise<EvaluationContext> {
@@ -177,4 +231,19 @@ export async function deleteRecording(sessionId: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await errorMessage(response, "No se pudo eliminar la grabación."));
   }
+}
+
+export async function deleteCandidateFolder(candidateName: string): Promise<{
+  candidateName: string;
+  deletedSessionIds: string[];
+  deletedS3Keys: string[];
+}> {
+  const response = await fetch(
+    `${API_BASE}/candidates?name=${encodeURIComponent(candidateName)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw new Error(await errorMessage(response, "No se pudo eliminar la carpeta del candidato."));
+  }
+  return response.json();
 }

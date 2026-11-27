@@ -130,19 +130,69 @@ _GENERIC_TERMS = {
     "backend": ("backend", "back end"),
 }
 
-# Folded regex pattern -> canonical display label
+# Folded regex pattern -> canonical display label (multi-word phrases first so
+# e.g. "la verdad" does not double-count as "verdad").
 _MULETILLA_PATTERNS = (
     (r"\bo sea\b", "o sea"),
     (r"\bla verdad\b", "la verdad"),
     (r"\bes que\b", "es que"),
+    (r"\bcomo que\b", "como que"),
+    (r"\b(?:ahm+|am+)\b", "ahm"),
+    (r"\b(?:emm+|em+|um+|uhm+)\b", "emm"),
     (r"\beh+\b", "eh"),
+    (r"\buh+\b", "uh"),
+    (r"\bah+\b", "ah"),
+    (r"\bmm+\b", "mmm"),
+    (r"\b(?:aja+|aha+)\b", "ajá"),
     (r"\beste+\b", "este"),
     (r"\bpues\b", "pues"),
     (r"\bbueno\b", "bueno"),
     (r"\bverdad\b", "verdad"),
     (r"\bdigamos\b", "digamos"),
     (r"\bbasicamente\b", "básicamente"),
-    (r"\bmmm+\b", "mmm"),
+    (r"\bentonces\b", "entonces"),
+    (r"\bvale\b", "vale"),
+    (r"\b(?:ok|okey|okay)\b", "ok"),
+)
+
+_MULETILLA_GROUP_LABELS = [label for _, label in _MULETILLA_PATTERNS]
+_MULETILLA_COMBINED_RE = re.compile(
+    "|".join(f"(?P<m{i}>{pattern})" for i, (pattern, _) in enumerate(_MULETILLA_PATTERNS))
+)
+
+SECTION_LABELS = {
+    "javascript": "JavaScript / TypeScript",
+    "react": "React / Next.js",
+    "node": "Node.js / Express",
+    "python": "Python",
+    "fastapi": "FastAPI",
+    "general": "General",
+}
+
+_TERM_SECTION = {}
+_TERM_SECTION.update({key: "python" for key in _PYTHON_TERMS})
+_TERM_SECTION.update({key: "javascript" for key in _JS_TERMS})
+_TERM_SECTION.update({key: "general" for key in _GENERIC_TERMS})
+_TERM_SECTION.update(
+    {
+        "fastapi": "fastapi",
+        "pydantic": "fastapi",
+        "uvicorn": "fastapi",
+        "react": "react",
+        "next.js": "react",
+        "componente": "react",
+        "props": "react",
+        "estado": "react",
+        "hook": "react",
+        "redux": "react",
+        "tsx": "react",
+        "node": "node",
+        "express": "node",
+        "npm": "node",
+        "jwt": "node",
+        "cors": "node",
+        "localstorage": "node",
+    }
 )
 
 
@@ -214,12 +264,14 @@ def extract_technical_terms(text: str, technology: str = ""):
     hits = {}
 
     for folded_alias, canonical, alias in aliases:
-        pattern = r"(?<![a-z0-9_])" + re.escape(folded_alias) + r"(?![a-z0-9_])"
+        boundary = r"[a-z0-9_.]" if len(folded_alias) <= 2 else r"[a-z0-9_]"
+        pattern = rf"(?<!{boundary})" + re.escape(folded_alias) + r"(?![a-z0-9_])"
         if re.search(pattern, folded_text):
             hits[canonical] = {
                 "term": canonical,
                 "lemma": alias,
                 "category": "glossary",
+                "section": _TERM_SECTION.get(canonical, "general"),
             }
 
     nlp = _load_nlp()
@@ -247,6 +299,7 @@ def extract_technical_terms(text: str, technology: str = ""):
                 "term": canonical,
                 "lemma": token.text,
                 "category": category,
+                "section": _TERM_SECTION.get(canonical, "general"),
             }
 
     return sorted(hits.values(), key=lambda item: item["term"])
@@ -267,10 +320,11 @@ def extract_muletillas(text: str) -> dict:
     folded_text = _fold(spoken)
     counts = Counter()
 
-    for pattern, label in _MULETILLA_PATTERNS:
-        matches = re.findall(pattern, folded_text)
-        if matches:
-            counts[label] += len(matches)
+    for match in _MULETILLA_COMBINED_RE.finditer(folded_text):
+        group_name = match.lastgroup
+        if group_name is not None:
+            label = _MULETILLA_GROUP_LABELS[int(group_name[1:])]
+            counts[label] += 1
 
     total_words = len(re.findall(r"\b\w+\b", folded_text))
     total_muletillas = sum(counts.values())

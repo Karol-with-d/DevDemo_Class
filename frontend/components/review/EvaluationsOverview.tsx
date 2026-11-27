@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { SavedRecording, listRecordings } from "../../lib/api";
+import { SavedRecording, deleteCandidateFolder, listRecordings } from "../../lib/api";
+import { DeleteCandidateDialog } from "./DeleteCandidateDialog";
 
 interface EvaluationsOverviewProps {
   onBack: () => void;
@@ -49,6 +50,10 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
   const [items, setItems] = useState<SavedRecording[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pendingDelete, setPendingDelete] = useState<CandidateGroup | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     listRecordings()
@@ -61,6 +66,25 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
       })
       .finally(() => setLoading(false));
   }, []);
+
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteCandidateFolder(pendingDelete.candidateName);
+      const removedKey = pendingDelete.candidateName.trim().toLowerCase();
+      setItems((current) =>
+        current.filter((item) => (item.candidateName || "Candidato").trim().toLowerCase() !== removedKey),
+      );
+      setNotice(`Se eliminó la carpeta de ${pendingDelete.candidateName}.`);
+      setPendingDelete(null);
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "No se pudo eliminar la carpeta.");
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const groups = groupByCandidate(items);
 
@@ -84,6 +108,7 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
       </div>
 
       {error && <p className="mb-4 text-sm text-red-400">{error}</p>}
+      {notice && <p className="mb-4 text-sm text-[#9ce4c1]">{notice}</p>}
 
       {!error && !loading && groups.length === 0 && (
         <p className="text-sm text-[#82918f]">
@@ -100,12 +125,15 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
               0,
             );
             return (
-              <button
+              <div
                 key={group.candidateName}
-                type="button"
-                onClick={() => onSelectCandidate(group.recordings)}
-                className="group flex cursor-pointer flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-left transition hover:border-[#9ce4c1]/50 hover:bg-[#9ce4c1]/5"
+                className="group flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-5 text-left transition hover:border-[#9ce4c1]/50 hover:bg-[#9ce4c1]/5"
               >
+                <button
+                  type="button"
+                  onClick={() => onSelectCandidate(group.recordings)}
+                  className="flex cursor-pointer flex-col gap-3 text-left"
+                >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#9ce4c1]/10 text-lg text-[#9ce4c1]">
                     <svg
@@ -144,10 +172,37 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
                   <span>Última: {formatDate(latest.savedAt)}</span>
                   <span>{totalSegments} subtítulos</span>
                 </div>
-              </button>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDeleteError(null);
+                    setPendingDelete(group);
+                  }}
+                  className="rounded-xl border border-red-400/35 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-950/40"
+                >
+                  Eliminar carpeta
+                </button>
+              </div>
             );
           })}
         </div>
+      )}
+
+      {pendingDelete && (
+        <DeleteCandidateDialog
+          candidateName={pendingDelete.candidateName}
+          recordingCount={pendingDelete.recordings.length}
+          busy={deleting}
+          error={deleteError}
+          onCancel={() => {
+            if (!deleting) {
+              setPendingDelete(null);
+              setDeleteError(null);
+            }
+          }}
+          onConfirm={() => void handleConfirmDelete()}
+        />
       )}
     </div>
   );

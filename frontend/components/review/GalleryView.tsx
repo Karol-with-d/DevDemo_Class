@@ -156,6 +156,7 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
               <TechnicalTranscript
                 segments={selected.segments ?? []}
                 vocabulary={selected.vocabulary ?? []}
+                muletillas={selected.muletillas}
               />
               <div className="mt-2 flex flex-wrap gap-2">
                 {selected.videoKey && (
