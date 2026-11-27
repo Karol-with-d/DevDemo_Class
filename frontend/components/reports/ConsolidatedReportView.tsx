@@ -55,11 +55,16 @@ const SCALE_OPTIONS: { code: UnivoScale; label: string; score: number }[] = [
   { code: "NM", label: "Necesita Mejorar", score: 50 },
 ];
 
-const VERDICT_OPTIONS: VerdictOption[] = [
-  "Excelente / Destacado",
-  "Cumple adecuadamente",
-  "Debe mejorar",
-  "Requiere seguimiento",
+const VERDICT_RANGES: {
+  option: VerdictOption;
+  min: number;
+  max: number;
+  rangeLabel: string;
+}[] = [
+  { option: "Excelente / Destacado", min: 90, max: 100, rangeLabel: "90% – 100%" },
+  { option: "Cumple adecuadamente", min: 75, max: 89, rangeLabel: "75% – 89%" },
+  { option: "Debe mejorar", min: 60, max: 74, rangeLabel: "60% – 74%" },
+  { option: "Requiere seguimiento", min: 0, max: 59, rangeLabel: "0% – 59%" },
 ];
 
 const QUICK_TAGS = [
@@ -70,18 +75,39 @@ const QUICK_TAGS = [
   "Reforzar retroalimentación de errores",
 ];
 
-const INITIAL_DIMENSIONS: DimensionItem[] = rubric.map(({ id, title, univoScope }) => ({
-  id,
-  title,
-  univoScope,
-  aiScore: null,
-  adjustedScore: null,
-  scale: null,
-  feedback: "",
-  evidence: null,
-}));
+const INITIAL_DIMENSIONS: DimensionItem[] = rubric.map(
+  ({ id, title, univoScope }) => ({
+    id,
+    title,
+    univoScope,
+    aiScore: null,
+    adjustedScore: null,
+    scale: null,
+    feedback: "",
+    evidence: null,
+  })
+);
 
-function applySuggestions(dimensions: DimensionItem[], suggestions: RubricSuggestion[]) {
+function scoreToScale(score: number): UnivoScale {
+  if (score >= 92) return "E";
+  if (score >= 82) return "MB";
+  if (score >= 72) return "B";
+  if (score >= 60) return "R";
+  return "NM";
+}
+
+function scoreToVerdict(avgScore: number | null): VerdictOption | null {
+  if (avgScore === null) return null;
+  const match = VERDICT_RANGES.find(
+    (range) => avgScore >= range.min && avgScore <= range.max
+  );
+  return match ? match.option : "Requiere seguimiento";
+}
+
+function applySuggestions(
+  dimensions: DimensionItem[],
+  suggestions: RubricSuggestion[]
+) {
   return dimensions.map((dimension) => {
     const suggestion = suggestions.find(({ id }) => id === dimension.id);
     if (!suggestion) return dimension;
@@ -97,26 +123,17 @@ function applySuggestions(dimensions: DimensionItem[], suggestions: RubricSugges
   });
 }
 
-function escapeHtml(value: string) {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
 function formatScore(score: number | null) {
   return score === null ? "Sin evaluar" : `${score}%`;
 }
 
 function savedScore(value: unknown) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 100
     ? value
     : null;
-}
-
-function scoreToScale(score: number): UnivoScale {
-  if (score >= 92) return "E";
-  if (score >= 82) return "MB";
-  if (score >= 72) return "B";
-  if (score >= 60) return "R";
-  return "NM";
 }
 
 export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
@@ -129,8 +146,8 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   initialSegments = [],
   initialVocabulary = [],
 }) => {
-  const [dimensions, setDimensions] = useState<DimensionItem[]>(INITIAL_DIMENSIONS);
-  const [verdict, setVerdict] = useState<VerdictOption | null>(null);
+  const [dimensions, setDimensions] =
+    useState<DimensionItem[]>(INITIAL_DIMENSIONS);
   const [qualitativeNotes, setQualitativeNotes] = useState("");
   const [evaluationSaved, setEvaluationSaved] = useState(false);
   const [savedLocation, setSavedLocation] = useState<string | null>(null);
@@ -150,22 +167,28 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const [suggestionsLoaded, setSuggestionsLoaded] = useState(false);
   const [suggestionError, setSuggestionError] = useState<string | null>(null);
 
-  const requestSuggestions = useCallback(async (signal?: AbortSignal) => {
-    setSuggesting(true);
-    setSuggestionError(null);
-    try {
-      const { dimensions: suggestions } = await getRubricSuggestions(sessionId, signal);
-      if (signal?.aborted) return;
-      setDimensions((current) => applySuggestions(current, suggestions));
-      setSuggestionsLoaded(suggestions.length > 0);
-    } catch (error) {
-      if (!signal?.aborted && error instanceof Error) {
-        setSuggestionError(error.message);
+  const requestSuggestions = useCallback(
+    async (signal?: AbortSignal) => {
+      setSuggesting(true);
+      setSuggestionError(null);
+      try {
+        const { dimensions: suggestions } = await getRubricSuggestions(
+          sessionId,
+          signal
+        );
+        if (signal?.aborted) return;
+        setDimensions((current) => applySuggestions(current, suggestions));
+        setSuggestionsLoaded(suggestions.length > 0);
+      } catch (error) {
+        if (!signal?.aborted && error instanceof Error) {
+          setSuggestionError(error.message);
+        }
+      } finally {
+        if (!signal?.aborted) setSuggesting(false);
       }
-    } finally {
-      if (!signal?.aborted) setSuggesting(false);
-    }
-  }, [sessionId]);
+    },
+    [sessionId]
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -179,6 +202,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         if (signal.aborted) return;
         setSegments(initialSegments);
         setVocabulary(initialVocabulary);
+        setStatusMessage({
+          type: "info",
+          text: "No se pudo consultar una evaluación previa (el servidor respondió con error). Puedes calificar manualmente.",
+        });
         setLoadState("ready");
         if (autoSuggest && initialSegments.some(({ text }) => text.trim())) {
           await requestSuggestions(signal);
@@ -193,29 +220,39 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       setVideoMetrics(context.videoMetrics ?? null);
       const saved = context.evaluation;
       if (saved) {
-        const scores = Array.isArray(saved.rubricScores) ? saved.rubricScores : [];
-        setDimensions(INITIAL_DIMENSIONS.map((item) => {
-          const score = scores.find((entry) => entry?.id === item.id);
-          if (!score) return item;
-          const adjustedScore = savedScore(score.finalScore);
-          const savedScale = SCALE_OPTIONS.find(({ code }) => code === score.scale);
-          return {
-            ...item,
-            aiScore: savedScore(score.aiScore),
-            adjustedScore,
-            scale: adjustedScore === null ? null : savedScale?.code ?? scoreToScale(adjustedScore),
-            feedback: typeof score.feedback === "string" ? score.feedback : "",
-            evidence: typeof score.evidence === "string" ? score.evidence : null,
-          };
-        }));
-        if (saved.overallVerdict && VERDICT_OPTIONS.includes(saved.overallVerdict as VerdictOption)) {
-          setVerdict(saved.overallVerdict as VerdictOption);
-        }
+        const scores = Array.isArray(saved.rubricScores)
+          ? saved.rubricScores
+          : [];
+        setDimensions(
+          INITIAL_DIMENSIONS.map((item) => {
+            const score = scores.find((entry) => entry?.id === item.id);
+            if (!score) return item;
+            const adjustedScore = savedScore(score.finalScore);
+            const savedScale = SCALE_OPTIONS.find(
+              ({ code }) => code === score.scale
+            );
+            return {
+              ...item,
+              aiScore: savedScore(score.aiScore),
+              adjustedScore,
+              scale:
+                adjustedScore === null
+                  ? null
+                  : savedScale?.code ?? scoreToScale(adjustedScore),
+              feedback:
+                typeof score.feedback === "string" ? score.feedback : "",
+              evidence:
+                typeof score.evidence === "string" ? score.evidence : null,
+            };
+          })
+        );
         if (typeof saved.qualitativeObservations === "string") {
           setQualitativeNotes(saved.qualitativeObservations);
         }
         setEvaluationSaved(true);
-        setSavedLocation(context.source === "s3" ? "en AWS S3" : "en este equipo");
+        setSavedLocation(
+          context.source === "s3" ? "en AWS S3" : "en este equipo"
+        );
         setSuggestionsLoaded(true);
       }
 
@@ -232,7 +269,9 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   }, [sessionId, autoSuggest, loadAttempt, requestSuggestions]);
 
   const metrics = useMemo(() => {
-    const scores = dimensions.flatMap(({ adjustedScore }) => adjustedScore === null ? [] : [adjustedScore]);
+    const scores = dimensions.flatMap(({ adjustedScore }) =>
+      adjustedScore === null ? [] : [adjustedScore]
+    );
     const avgScore = scores.length
       ? Math.round(scores.reduce((sum, score) => sum + score, 0) / scores.length)
       : null;
@@ -243,14 +282,41 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     return { avgScore, counts };
   }, [dimensions]);
 
-  const legacyIndicators: RubricIndicator[] = dimensions.flatMap((item) =>
-    item.adjustedScore === null ? [] : [{
-      id: item.id,
-      label: item.title,
-      aiScore: item.aiScore,
-      adjustedScore: item.adjustedScore,
-      feedback: item.feedback,
-    }],
+  const computedVerdict = useMemo(
+    () => scoreToVerdict(metrics.avgScore),
+    [metrics.avgScore]
+  );
+
+  const alwaysVisibleIndicators: RubricIndicator[] = useMemo(
+    () =>
+      dimensions.map((item) => ({
+        id: item.id,
+        label: item.title,
+        aiScore: item.aiScore,
+        adjustedScore: item.adjustedScore ?? 0,
+        feedback:
+          item.feedback ||
+          (item.adjustedScore === null
+            ? "Pendiente de evaluación. Selecciona una escala o desliza para asignar puntaje."
+            : ""),
+      })),
+    [dimensions]
+  );
+
+  const evaluatedIndicators = useMemo(
+    () =>
+      dimensions.flatMap((item) =>
+        item.adjustedScore === null
+          ? []
+          : [
+              {
+                indicator: item.title,
+                score: item.adjustedScore,
+                feedback: item.feedback,
+              },
+            ]
+      ),
+    [dimensions]
   );
 
   const hasTranscript = segments.some(({ text }) => text.trim());
@@ -268,7 +334,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     technology,
     complexity,
     rubricStandard: "UNIVO-Observacion-Docente",
-    overallVerdict: verdict,
+    overallVerdict: computedVerdict,
     quantitativeSummary: {
       averageScore: metrics.avgScore,
       scaleDistribution: metrics.counts,
@@ -280,7 +346,16 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     muletillas,
     timestamp: new Date().toISOString(),
     rubricScores: dimensions.map(
-      ({ id, title, univoScope, aiScore, adjustedScore, scale, feedback, evidence }) => ({
+      ({
+        id,
+        title,
+        univoScope,
+        aiScore,
+        adjustedScore,
+        scale,
+        feedback,
+        evidence,
+      }) => ({
         id,
         label: title,
         univoScope,
@@ -296,98 +371,189 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     qualitativeObservations: qualitativeNotes,
   });
 
-  const handleDownloadRubric = () => {
-    const data = buildEvaluationPayload();
-    const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const fileTitle = `Rubrica_${safeSessionId}_${new Date().toISOString().slice(0, 10)}`;
+  const handleDownloadRubricPdf = async () => {
+    try {
+      const { jsPDF } = await import("jspdf");
+      const data = buildEvaluationPayload();
+      const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const fileName = `Rubrica_${safeSessionId}_${new Date()
+        .toISOString()
+        .slice(0, 10)}.pdf`;
 
-    const rowsHtml = data.rubricScores
-      .map(
-        (r) => `
-          <tr>
-            <td style="padding:10px;border:1px solid #cbd5e1;">
-              <strong>${escapeHtml(r.label)}</strong><br/>
-              <span style="font-size:11px;color:#475569;">${escapeHtml(r.univoScope)}</span><br/>
-              <span style="font-size:12px;color:#334155;">${escapeHtml(r.feedback)}${r.evidence ? `<br/>«${escapeHtml(r.evidence)}»` : ""}</span>
-            </td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;">${r.aiScore === null ? "Sin sugerencia" : formatScore(r.aiScore)}</td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${formatScore(r.finalScore)}</td>
-            <td style="padding:10px;border:1px solid #cbd5e1;text-align:center;font-weight:bold;">${r.scale ?? "—"}</td>
-          </tr>
-        `
-      )
-      .join("");
+      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 15;
+      const contentWidth = pageWidth - margin * 2;
+      let y = 18;
 
-    const printWindow = window.open("", "_blank", "width=900,height=700");
-    if (!printWindow) {
+      const ensureSpace = (neededHeight: number) => {
+        if (y + neededHeight > pageHeight - 16) {
+          doc.addPage();
+          y = 18;
+        }
+      };
+
+      doc.setFillColor(15, 23, 42);
+      doc.rect(margin, y - 6, contentWidth, 22, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(14);
+      doc.text("Consolidado de Evaluación — Rúbrica UNIVO", margin + 4, y + 2);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(203, 213, 225);
+      doc.text(
+        `Sesión: ${data.sessionId}  |  Candidato: ${
+          data.candidateName || "N/D"
+        }  |  Fecha: ${new Date(data.timestamp).toLocaleString()}`,
+        margin + 4,
+        y + 10
+      );
+      y += 23;
+
+      doc.setDrawColor(203, 213, 225);
+      doc.setFillColor(248, 250, 252);
+      doc.roundedRect(margin, y, contentWidth, 18, 2, 2, "FD");
+
+      doc.setTextColor(15, 23, 42);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.text(
+        `Promedio Final: ${formatScore(data.quantitativeSummary.averageScore)}`,
+        margin + 4,
+        y + 7
+      );
+      doc.text(
+        `Dictamen Automático: ${data.overallVerdict ?? "Pendiente de evaluación"}`,
+        margin + 68,
+        y + 7
+      );
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(71, 85, 105);
+      const dist = data.quantitativeSummary.scaleDistribution;
+      doc.text(
+        `Distribución por escala:  E: ${dist.E}   ·   MB: ${dist.MB}   ·   B: ${dist.B}   ·   R: ${dist.R}   ·   NM: ${dist.NM}`,
+        margin + 4,
+        y + 14
+      );
+      y += 25;
+
+      doc.setFillColor(226, 232, 240);
+      doc.rect(margin, y, contentWidth, 8, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setTextColor(15, 23, 42);
+      doc.text("Dimensión y Criterios", margin + 3, y + 5.5);
+      doc.text("Sug. IA", margin + 122, y + 5.5, { align: "center" });
+      doc.text("Final", margin + 145, y + 5.5, { align: "center" });
+      doc.text("Escala", margin + 168, y + 5.5, { align: "center" });
+      y += 8;
+
+      for (const r of data.rubricScores) {
+        const titleLines = doc.splitTextToSize(r.label, 105);
+        const scopeLines = doc.splitTextToSize(r.univoScope, 105);
+        const detailText = [
+          r.feedback,
+          r.evidence ? `Cita: "${r.evidence}"` : "",
+        ]
+          .filter(Boolean)
+          .join(" — ");
+        const detailLines = detailText
+          ? doc.splitTextToSize(detailText, 105)
+          : [];
+
+        const rowHeight = Math.max(
+          14,
+          titleLines.length * 4.5 +
+            scopeLines.length * 4 +
+            detailLines.length * 4 +
+            6
+        );
+
+        ensureSpace(rowHeight);
+
+        doc.setDrawColor(203, 213, 225);
+        doc.rect(margin, y, contentWidth, rowHeight);
+
+        let textY = y + 5;
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text(titleLines, margin + 3, textY);
+        textY += titleLines.length * 4.5;
+
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(8);
+        doc.setTextColor(5, 150, 105);
+        doc.text(scopeLines, margin + 3, textY);
+        textY += scopeLines.length * 4;
+
+        if (detailLines.length > 0) {
+          doc.setTextColor(71, 85, 105);
+          doc.text(detailLines, margin + 3, textY);
+        }
+
+        const midY = y + rowHeight / 2 + 1.5;
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(51, 65, 85);
+        doc.text(
+          r.aiScore === null ? "Manual" : `${r.aiScore}%`,
+          margin + 122,
+          midY,
+          { align: "center" }
+        );
+
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(15, 23, 42);
+        doc.text(formatScore(r.finalScore), margin + 145, midY, {
+          align: "center",
+        });
+        doc.text(r.scale ?? "—", margin + 168, midY, { align: "center" });
+
+        y += rowHeight;
+      }
+
+      y += 6;
+
+      const notesText =
+        data.qualitativeObservations.trim() || "Sin observaciones adicionales.";
+      const notesLines = doc.splitTextToSize(notesText, contentWidth - 8);
+      const notesBoxHeight = notesLines.length * 4.5 + 12;
+      ensureSpace(notesBoxHeight);
+
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(203, 213, 225);
+      doc.roundedRect(margin, y, contentWidth, notesBoxHeight, 2, 2, "FD");
+
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text("Observaciones del Evaluador:", margin + 4, y + 6);
+
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(9);
+      doc.setTextColor(51, 65, 85);
+      doc.text(notesLines, margin + 4, y + 12);
+
+      doc.save(fileName);
+
+      setStatusMessage({
+        type: "success",
+        text: `PDF descargado: ${fileName}`,
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "No se pudo generar el PDF.";
       setStatusMessage({
         type: "error",
-        text: "Permite las ventanas emergentes en el navegador para exportar el PDF.",
+        text: `Error al descargar PDF: ${msg}`,
       });
-      return;
     }
-
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html lang="es">
-      <head>
-        <meta charset="UTF-8" />
-        <title>${fileTitle}</title>
-        <style>
-          body { font-family: Arial, sans-serif; color: #0f172a; padding: 28px; }
-          h1 { margin: 0 0 6px; font-size: 20px; }
-          .meta { font-size: 12px; color: #475569; margin-bottom: 18px; }
-          .summary { display: flex; gap: 16px; margin-bottom: 18px; font-size: 13px; flex-wrap: wrap; }
-          .box { border: 1px solid #cbd5e1; border-radius: 6px; padding: 10px 14px; }
-          table { width: 100%; border-collapse: collapse; margin-bottom: 18px; font-size: 13px; }
-          th { background: #f1f5f9; padding: 10px; border: 1px solid #cbd5e1; text-align: left; }
-          th.center { text-align: center; }
-          .notes { border: 1px solid #cbd5e1; border-radius: 6px; padding: 12px; background: #f8fafc; font-size: 13px; }
-          @media print { .no-print { display: none; } }
-        </style>
-      </head>
-      <body>
-        <div class="no-print" style="margin-bottom:14px;">
-          <button onclick="window.print()" style="padding:8px 14px;background:#059669;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;">
-            Guardar como PDF / Imprimir
-          </button>
-        </div>
-        <h1>Consolidado de Evaluación — Rúbrica UNIVO</h1>
-        <div class="meta">
-          Sesión: <strong>${escapeHtml(data.sessionId)}</strong> · Candidato: <strong>${escapeHtml(data.candidateName || "N/D")}</strong> · Fecha: ${new Date(data.timestamp).toLocaleString()}
-        </div>
-        <div class="summary">
-          <div class="box">Promedio de dimensiones calificadas: <strong>${formatScore(data.quantitativeSummary.averageScore)}</strong></div>
-          <div class="box">Dictamen: <strong>${data.overallVerdict ?? "Pendiente"}</strong></div>
-          <div class="box">Escala: E:${data.quantitativeSummary.scaleDistribution.E} · MB:${data.quantitativeSummary.scaleDistribution.MB} · B:${data.quantitativeSummary.scaleDistribution.B} · R:${data.quantitativeSummary.scaleDistribution.R} · NM:${data.quantitativeSummary.scaleDistribution.NM}</div>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Dimensión</th>
-              <th class="center">IA</th>
-              <th class="center">Puntaje Final</th>
-              <th class="center">Escala</th>
-            </tr>
-          </thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-        <div class="notes">
-          <strong>Observaciones del Evaluador:</strong>
-          <p style="margin:6px 0 0;">${escapeHtml(data.qualitativeObservations || "Sin observaciones adicionales.")}</p>
-        </div>
-        <script>
-          window.onload = function() { setTimeout(function() { window.print(); }, 250); };
-        </script>
-      </body>
-      </html>
-    `);
-    printWindow.document.close();
-
-    setStatusMessage({
-      type: "info",
-      text: "Vista de impresión abierta: selecciona 'Guardar como PDF' para descargarlo.",
-    });
   };
 
   const handleScaleSelect = (id: string, scale: UnivoScale) => {
@@ -406,11 +572,18 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   };
 
   const handleScoreChange = (id: string, newScore: number | null) => {
-    const clamped = newScore === null ? null : Math.round(Math.max(0, Math.min(100, newScore)));
+    const clamped =
+      newScore === null
+        ? null
+        : Math.round(Math.max(0, Math.min(100, newScore)));
     setDimensions((prev) =>
       prev.map((item) =>
         item.id === id
-          ? { ...item, adjustedScore: clamped, scale: clamped === null ? null : scoreToScale(clamped) }
+          ? {
+              ...item,
+              adjustedScore: clamped,
+              scale: clamped === null ? null : scoreToScale(clamped),
+            }
           : item
       )
     );
@@ -459,15 +632,20 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
     }
   };
 
-  if (loadState === "loading") return <p role="status">Cargando transcripción y rúbrica…</p>;
+  if (loadState === "loading")
+    return <p role="status">Cargando transcripción y rúbrica…</p>;
   if (loadState === "error") {
     return (
       <div className="space-y-2">
         <p role="alert">No se pudo consultar la evaluación guardada.</p>
-        <button type="button" className="underline" onClick={() => {
-          setLoadState("loading");
-          setLoadAttempt((attempt) => attempt + 1);
-        }}>
+        <button
+          type="button"
+          className="underline"
+          onClick={() => {
+            setLoadState("loading");
+            setLoadAttempt((attempt) => attempt + 1);
+          }}
+        >
           Reintentar
         </button>
       </div>
@@ -476,12 +654,14 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
 
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
-      {/* Encabezado + KPIs rápidos + Descarga de rúbrica */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
         <div>
-          <h2 className="text-2xl font-bold text-white">Consolidado de Evaluación</h2>
+          <h2 className="text-2xl font-bold text-white">
+            Consolidado de Evaluación
+          </h2>
           <p className="text-xs text-slate-400">
-            Guía de Observación UNIVO · Escala E / MB / B / R / NM · Resumen Cuantitativo y Vocabulario Técnico
+            Guía de Observación UNIVO · Escala E / MB / B / R / NM · Resumen
+            Cuantitativo y Vocabulario Técnico
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -493,11 +673,11 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           </span>
           <button
             type="button"
-            onClick={handleDownloadRubric}
+            onClick={() => void handleDownloadRubricPdf()}
             disabled={suggesting}
-            className="text-xs px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 font-medium border border-emerald-500/40 transition-colors cursor-pointer"
+            className="text-xs px-3.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-300 font-medium border border-emerald-500/40 transition-colors cursor-pointer disabled:opacity-50"
           >
-            Descargar Rúbrica
+            Descargar Rúbrica (PDF)
           </button>
         </div>
       </div>
@@ -553,7 +733,6 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         )}
       </div>
 
-      {/* Rúbrica ágil por dimensiones UNIVO */}
       <div className="space-y-3">
         {dimensions.map((item) => (
           <div
@@ -566,12 +745,22 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                 <span className="text-[11px] font-mono text-slate-400">
                   {item.aiScore === null
                     ? "Sin sugerencia"
-                    : `${item.evidence ? "IA" : "IA anterior sin cita"}: ${item.aiScore}%`}
+                    : `${item.evidence ? "IA" : "IA anterior sin cita"}: ${
+                        item.aiScore
+                      }%`}
                 </span>
               </div>
-              <p className="text-[11px] text-emerald-400/90">{item.univoScope}</p>
-              {item.feedback && <p className="text-xs text-slate-400">{item.feedback}</p>}
-              {item.evidence && <blockquote className="text-xs text-slate-300">«{item.evidence}»</blockquote>}
+              <p className="text-[11px] text-emerald-400/90">
+                {item.univoScope}
+              </p>
+              {item.feedback && (
+                <p className="text-xs text-slate-400">{item.feedback}</p>
+              )}
+              {item.evidence && (
+                <blockquote className="text-xs text-slate-300">
+                  «{item.evidence}»
+                </blockquote>
+              )}
             </div>
 
             <div className="flex flex-col items-start md:items-end gap-2">
@@ -604,7 +793,12 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                   max={100}
                   value={item.adjustedScore ?? ""}
                   placeholder="—"
-                  onChange={(e) => handleScoreChange(item.id, e.target.value === "" ? null : Number(e.target.value))}
+                  onChange={(e) =>
+                    handleScoreChange(
+                      item.id,
+                      e.target.value === "" ? null : Number(e.target.value)
+                    )
+                  }
                   className="w-16 bg-slate-950 border border-slate-800 rounded px-2 py-0.5 text-right text-slate-100 font-mono text-xs"
                 />
               </label>
@@ -614,51 +808,56 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       </div>
 
       <div className="space-y-4 pt-2">
-        {legacyIndicators.length > 0 && (
-          <>
-            <PerformanceMetricsChart
-              metrics={legacyIndicators.map(({ label, adjustedScore, feedback }) => (
-                { indicator: label, score: adjustedScore, feedback }
-              ))}
-            />
-            <HybridRubricEditor
-              indicators={legacyIndicators}
-              onScoreChange={handleScoreChange}
-            />
-          </>
+        {evaluatedIndicators.length > 0 && (
+          <PerformanceMetricsChart metrics={evaluatedIndicators} />
         )}
+        <HybridRubricEditor
+          indicators={alwaysVisibleIndicators}
+          onScoreChange={(id, score) => handleScoreChange(id, score)}
+        />
       </div>
 
-      {/* Dictamen, observaciones y guardado */}
       <div className="bg-slate-900 text-white p-6 rounded-xl border border-emerald-500/30 shadow-lg space-y-4">
-        <div>
-          <h3 className="text-base font-semibold text-emerald-400">
-            Dictamen y Observaciones del Evaluador
-          </h3>
-          <p className="text-xs text-slate-400">
-            Selecciona el dictamen general, haz clic en etiquetas rápidas o escribe observaciones adicionales.
-          </p>
+        <div className="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 className="text-base font-semibold text-emerald-400">
+              Dictamen y Observaciones del Evaluador
+            </h3>
+            <p className="text-xs text-slate-400">
+              El dictamen se asigna automáticamente según el promedio obtenido
+              para garantizar coherencia evaluativa.
+            </p>
+          </div>
+          <span className="text-xs font-mono px-3 py-1 rounded-full bg-slate-950 border border-emerald-500/40 text-emerald-300">
+            {computedVerdict ?? "Pendiente de calificación"}
+          </span>
         </div>
 
-        {/* Selector rápido de dictamen */}
-        <div className="flex flex-wrap gap-2">
-          {VERDICT_OPTIONS.map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setVerdict(option)}
-              className={`text-xs px-3.5 py-1.5 rounded-full border transition-colors cursor-pointer ${
-                verdict === option
-                  ? "bg-emerald-600/20 border-emerald-400 text-emerald-300 font-semibold"
-                  : "bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200"
-              }`}
-            >
-              {option}
-            </button>
-          ))}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+          {VERDICT_RANGES.map(({ option, rangeLabel }) => {
+            const isMatched = computedVerdict === option;
+            return (
+              <div
+                key={option}
+                aria-current={isMatched ? "true" : undefined}
+                className={`rounded-lg border px-3 py-2 text-xs transition-colors ${
+                  isMatched
+                    ? "bg-emerald-600/20 border-emerald-400 text-emerald-300 font-semibold"
+                    : "bg-slate-950/70 border-slate-800 text-slate-500"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span>{option}</span>
+                  {isMatched && <span>✓</span>}
+                </div>
+                <span className="block font-mono text-[11px] opacity-80 mt-0.5">
+                  Rango: {rangeLabel}
+                </span>
+              </div>
+            );
+          })}
         </div>
 
-        {/* Etiquetas rápidas de un clic */}
         <div className="flex flex-wrap gap-1.5">
           {QUICK_TAGS.map((tag) => {
             const selected = qualitativeNotes.includes(tag);
@@ -695,9 +894,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               disabled={isSaving || suggesting}
               className="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition-colors cursor-pointer"
             >
-              {isSaving ? "Guardando evaluación..." : "Guardar Evaluación Consolidada"}
+              {isSaving
+                ? "Guardando evaluación..."
+                : "Guardar Evaluación Consolidada"}
             </button>
-
           </div>
 
           {statusMessage && (
@@ -727,10 +927,10 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
               </div>
               <button
                 type="button"
-                onClick={handleDownloadRubric}
+                onClick={() => void handleDownloadRubricPdf()}
                 className="rounded-lg border border-emerald-500/40 bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-800"
               >
-                Descargar / imprimir PDF
+                Descargar Rúbrica (PDF)
               </button>
             </div>
             <div className="overflow-x-auto p-4">
@@ -739,7 +939,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
                   Promedio: <strong>{formatScore(metrics.avgScore)}</strong>
                 </span>
                 <span className="rounded-md border border-slate-800 px-2 py-1">
-                  Dictamen: <strong>{verdict ?? "Pendiente"}</strong>
+                  Dictamen: <strong>{computedVerdict ?? "Pendiente"}</strong>
                 </span>
                 <span className="rounded-md border border-slate-800 px-2 py-1 font-mono">
                   E:{metrics.counts.E} · MB:{metrics.counts.MB} · B:{metrics.counts.B} · R:{metrics.counts.R} · NM:{metrics.counts.NM}
