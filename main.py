@@ -16,7 +16,7 @@ if __name__ == "__main__" and _port_is_open(HOST, PORT):
     print(f"Backend already running at http://{HOST}:{PORT}")
     raise SystemExit(0)
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 import asyncio
@@ -37,6 +37,7 @@ from transcriber import (
     delete_local_session,
     list_saved_recordings,
     load_session_record,
+    sessions_for_candidate,
     replace_session_transcript,
     safe_session_id,
     transcribe_recording_file,
@@ -45,7 +46,7 @@ from transcriber import (
 from s3_storage import (
     allow_local_evaluation_fallback,
     allow_local_video_fallback,
-    delete_video_object,
+    delete_session_objects,
     is_s3_configured,
     media_type_for,
     read_evaluation_json,
@@ -431,42 +432,112 @@ async def play_video(key: str, download: bool = False):
     )
 
 
-@app.delete("/recordings/{session_id}")
-async def delete_recording(session_id: str):
+def _s3_http_error(exc: Exception) -> HTTPException:
+    detail = str(exc)
+    lowered = detail.lower()
+    if "listbucket" in lowered or "deleteobject" in lowered or "accessdenied" in lowered or "not authorized" in lowered:
+        return HTTPException(status_code=403, detail=detail)
+    return HTTPException(status_code=502, detail=detail)
+
+
+async def _cancel_pending_transcription(session_id: str) -> None:
     pending_task = pending_transcriptions.pop(safe_session_id(session_id), None)
-    if pending_task is not None and not pending_task.done():
-        pending_task.cancel()
-        try:
-            await pending_task
-        except (asyncio.CancelledError, Exception):
-            pass
-    record = load_session_record(session_id)
-    if not record:
-        raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
-    video_key = record.get("videoKey")
-    if video_key and video_key.startswith(LOCAL_VIDEO_PREFIX):
-        try:
-            local_video_path(video_key).unlink(missing_ok=True)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
-    elif video_key:
-        try:
-            await asyncio.to_thread(delete_video_object, video_key)
-        except RuntimeError as exc:
-            detail = str(exc)
-            if "AccessDenied" in detail or "not authorized" in detail.lower():
-                raise HTTPException(
-                    status_code=403,
-                    detail="IAM no permite s3:DeleteObject. Agrégalo sobre recordings/* y vuelve a intentar.",
-                ) from exc
-            raise HTTPException(status_code=502, detail=detail) from exc
+    if pending_task is None or pending_task.done():
+        return
+    pending_task.cancel()
+    try:
+        await pending_task
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+def _delete_local_video_if_needed(video_key) -> None:
+    if not video_key or not str(video_key).startswith(LOCAL_VIDEO_PREFIX):
+        return
+    local_video_path(video_key).unlink(missing_ok=True)
+
+
+async def _purge_session_s3(session_id: str, video_key) -> list[str]:
+    if not is_s3_configured():
+        return []
+    extra = [video_key] if video_key and str(video_key).startswith("recordings/") else []
+    try:
+        result = await asyncio.to_thread(delete_session_objects, session_id, extra)
+    except RuntimeError as exc:
+        raise _s3_http_error(exc) from exc
+    return result.get("deletedKeys") or []
+
+
+def _purge_session_local(session_id: str, video_key) -> None:
+    try:
+        _delete_local_video_if_needed(video_key)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail="No se pudo eliminar el video local.") from exc
     try:
         delete_local_session(session_id)
     except OSError as exc:
         print(f"[WARN] No se vació del todo la carpeta local: {exc}")
     if load_session_record(session_id):
         raise HTTPException(status_code=500, detail="No se pudo quitar la sesión del historial.")
-    return {"ok": True, "sessionId": session_id}
+
+
+@app.delete("/recordings/{session_id}")
+async def delete_recording(session_id: str):
+    await _cancel_pending_transcription(session_id)
+    record = load_session_record(session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="No hay una sesión guardada con ese id.")
+    video_key = record.get("videoKey")
+    deleted_keys = await _purge_session_s3(session_id, video_key)
+    _purge_session_local(session_id, video_key)
+    return {"ok": True, "sessionId": session_id, "deletedS3Keys": deleted_keys}
+
+
+@app.delete("/candidates")
+async def delete_candidate_folder(name: str = Query(..., min_length=1)):
+    """Elimina todas las sesiones de un candidato: S3 (prefijo), rúbricas y carpeta local."""
+    sessions = sessions_for_candidate(name)
+    if not sessions:
+        raise HTTPException(
+            status_code=404,
+            detail="No hay una carpeta de candidato con ese nombre en este equipo.",
+        )
+
+    deleted_keys: list[str] = []
+    if is_s3_configured():
+        for item in sessions:
+            deleted_keys.extend(await _purge_session_s3(item["sessionId"], item.get("videoKey")))
+
+    deleted_ids = []
+    local_errors = []
+    for item in sessions:
+        session_id = item["sessionId"]
+        await _cancel_pending_transcription(session_id)
+        try:
+            _purge_session_local(session_id, item.get("videoKey"))
+            deleted_ids.append(session_id)
+        except HTTPException as exc:
+            local_errors.append(f"{session_id}: {exc.detail}")
+
+    leftover = sessions_for_candidate(name)
+    if leftover or local_errors:
+        still = ", ".join(item["sessionId"] for item in leftover) or "ninguna"
+        extra = f" Detalle: {'; '.join(local_errors)}" if local_errors else ""
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Se borraron objetos en S3, pero no se pudo vaciar el historial local "
+                f"({still}).{extra}"
+            ),
+        )
+
+    return {
+        "ok": True,
+        "candidateName": sessions[0].get("candidateName") or name,
+        "deletedSessionIds": deleted_ids,
+        "deletedS3Keys": deleted_keys,
+        "s3": is_s3_configured(),
+    }
 
 
 @app.post("/demo/transcribe")

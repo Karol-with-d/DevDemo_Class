@@ -132,7 +132,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
   const [dimensions, setDimensions] = useState<DimensionItem[]>(INITIAL_DIMENSIONS);
   const [verdict, setVerdict] = useState<VerdictOption | null>(null);
   const [qualitativeNotes, setQualitativeNotes] = useState("");
-  const [savedPayload, setSavedPayload] = useState<string | null>(null);
+  const [evaluationSaved, setEvaluationSaved] = useState(false);
   const [savedLocation, setSavedLocation] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{
@@ -214,7 +214,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         if (typeof saved.qualitativeObservations === "string") {
           setQualitativeNotes(saved.qualitativeObservations);
         }
-        setSavedPayload(JSON.stringify(saved, null, 2));
+        setEvaluationSaved(true);
         setSavedLocation(context.source === "s3" ? "en AWS S3" : "en este equipo");
         setSuggestionsLoaded(true);
       }
@@ -440,7 +440,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
       const result = await saveEvaluation(sessionId, jsonPayload);
 
       const location = result.source === "s3" ? "en AWS S3" : "en este equipo";
-      setSavedPayload(JSON.stringify(jsonPayload, null, 2));
+      setEvaluationSaved(true);
       setSuggestionsLoaded(true);
       setSavedLocation(location);
       setStatusMessage({
@@ -546,7 +546,7 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
         {!hasAnalysisData && <p>No hay una transcripción ni métricas de video guardadas. Puedes calificar la sesión manualmente.</p>}
         {suggesting && <p role="status">Generando sugerencias a partir de la transcripción y el análisis de video…</p>}
         {suggestionError && <p role="alert" className="text-rose-400">{suggestionError}</p>}
-        {hasAnalysisData && !suggesting && !suggestionsLoaded && !savedPayload && (
+        {hasAnalysisData && !suggesting && !suggestionsLoaded && !evaluationSaved && (
           <button type="button" className="text-emerald-300 underline" onClick={() => void requestSuggestions()}>
             {suggestionError ? "Reintentar sugerencias" : "Generar sugerencias"}
           </button>
@@ -716,12 +716,77 @@ export const ConsolidatedReportView: React.FC<ConsolidatedReportViewProps> = ({
           )}
         </div>
 
-        {savedPayload && (
-          <div className="mt-4 bg-slate-950 p-4 rounded-lg border border-slate-800">
-            <p className="text-xs text-slate-400 mb-2 font-mono">
-              Evaluación guardada {savedLocation}
-            </p>
-            <pre className="text-xs text-emerald-300 overflow-x-auto">{savedPayload}</pre>
+        {evaluationSaved && (
+          <div className="mt-4 overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-300">Vista previa de la rúbrica</p>
+                <p className="text-xs text-slate-400">
+                  Evaluación guardada {savedLocation}. Este es el mismo cuadro que se descarga o imprime en PDF.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleDownloadRubric}
+                className="rounded-lg border border-emerald-500/40 bg-slate-900 px-3.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-slate-800"
+              >
+                Descargar / imprimir PDF
+              </button>
+            </div>
+            <div className="overflow-x-auto p-4">
+              <div className="mb-3 flex flex-wrap gap-2 text-[11px] text-slate-300">
+                <span className="rounded-md border border-slate-800 px-2 py-1">
+                  Promedio: <strong>{formatScore(metrics.avgScore)}</strong>
+                </span>
+                <span className="rounded-md border border-slate-800 px-2 py-1">
+                  Dictamen: <strong>{verdict ?? "Pendiente"}</strong>
+                </span>
+                <span className="rounded-md border border-slate-800 px-2 py-1 font-mono">
+                  E:{metrics.counts.E} · MB:{metrics.counts.MB} · B:{metrics.counts.B} · R:{metrics.counts.R} · NM:{metrics.counts.NM}
+                </span>
+              </div>
+              <table className="w-full min-w-[36rem] border-collapse text-left text-xs text-slate-200">
+                <thead>
+                  <tr className="bg-slate-900 text-slate-300">
+                    <th className="border border-slate-800 px-3 py-2 font-semibold">Dimensión</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">IA</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">Puntaje final</th>
+                    <th className="border border-slate-800 px-3 py-2 text-center font-semibold">Escala</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dimensions.map((item) => (
+                    <tr key={item.id}>
+                      <td className="border border-slate-800 px-3 py-2 align-top">
+                        <p className="font-semibold text-white">{item.title}</p>
+                        <p className="mt-0.5 text-[11px] text-slate-500">{item.univoScope}</p>
+                        {item.feedback ? (
+                          <p className="mt-1 text-slate-400">{item.feedback}</p>
+                        ) : null}
+                        {item.evidence ? (
+                          <p className="mt-0.5 italic text-slate-500">«{item.evidence}»</p>
+                        ) : null}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center">
+                        {item.aiScore === null ? "Sin sugerencia" : formatScore(item.aiScore)}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center font-bold text-emerald-300">
+                        {formatScore(item.adjustedScore)}
+                      </td>
+                      <td className="border border-slate-800 px-3 py-2 text-center font-bold">
+                        {item.scale ?? "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {qualitativeNotes.trim() ? (
+                <p className="mt-3 text-xs text-slate-400">
+                  <span className="font-semibold text-slate-300">Observaciones: </span>
+                  {qualitativeNotes}
+                </p>
+              ) : null}
+            </div>
           </div>
         )}
       </div>

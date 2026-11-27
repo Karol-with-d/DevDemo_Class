@@ -1288,6 +1288,19 @@ def replace_session_transcript(session_id, segments, *, metadata=None):
     return session.write(analyze=True, transcript_source="final", force=True)
 
 
+def candidate_folder_key(name):
+    return (name or "Candidato").strip().lower() or "candidato"
+
+
+def sessions_for_candidate(candidate_name):
+    wanted = candidate_folder_key(candidate_name)
+    return [
+        item
+        for item in list_saved_recordings()
+        if candidate_folder_key(item.get("candidateName")) == wanted
+    ]
+
+
 def list_saved_recordings():
     items = []
     if not os.path.isdir(RECORDINGS_DIR):
