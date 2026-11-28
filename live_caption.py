@@ -209,6 +209,14 @@ async def _run_session(browser, session):
                         "t0": time.perf_counter(),
                     })
                     await send_upstream({"type": "input_audio_buffer.commit"})
+                elif kind == "reset":
+                    # "Reiniciar": descarta lo transcrito pero la sesión sigue.
+                    pending.clear()
+                    session.reset()
+                elif kind == "discard":
+                    # "Cancelar": no persistir nada; el cliente borra la carpeta.
+                    stored = True
+                    break
                 elif kind == "stop":
                     saved = session.write(analyze=True)
                     stored = True

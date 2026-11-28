@@ -195,6 +195,49 @@ h1, h2, h3, .font-manrope {
   background: currentColor;
 }
 
+.pause-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 18px;
+  border: 1px solid rgba(194, 220, 213, 0.25);
+  border-radius: 12px;
+  background: rgba(194, 220, 213, 0.08);
+  color: #e9f0ed;
+  font-size: 12px;
+  font-weight: 700;
+  transition: all 0.2s ease;
+  cursor: pointer;
+}
+
+.pause-button:hover:not(:disabled) {
+  border-color: rgba(156, 228, 193, 0.45);
+  color: #9ce4c1;
+  transform: translateY(-1px);
+}
+
+.pause-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pause-button-active {
+  border-color: rgba(156, 228, 193, 0.5);
+  color: #9ce4c1;
+  background: rgba(156, 228, 193, 0.12);
+}
+
+.pause-button-danger {
+  border-color: rgba(235, 127, 117, 0.35);
+  color: #f0978e;
+}
+
+.pause-button-danger:hover:not(:disabled) {
+  background: rgba(139, 51, 48, 0.25);
+  border-color: rgba(235, 127, 117, 0.5);
+  color: #f0978e;
+}
+
 @media (max-width: 760px) {
   .workspace-grid { grid-template-columns: 1fr; }
   .camera-column { height: min(55vh, 400px); }

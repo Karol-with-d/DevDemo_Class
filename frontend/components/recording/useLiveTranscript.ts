@@ -66,6 +66,9 @@ interface Engine {
   stopped: boolean;
   saved: TranscriptSaveResult | null;
   saveWaiters: Array<(result: TranscriptSaveResult) => void>;
+  paused: boolean;
+  pausedAt: number | null;
+  pausedTotal: number;
 }
 
 function emptyResult(segments: TranscriptSegment[]): TranscriptSaveResult {
@@ -129,7 +132,12 @@ function mergeSamples(chunks: Float32Array[], total: number) {
 }
 
 function elapsedSeconds(engine: Engine) {
-  return (performance.now() - engine.startedAt) / 1000;
+  // Paused wall time does not exist in the recording: timestamps must track
+  // the captured media, so freeze at pausedAt while paused and subtract the
+  // accumulated pause total.
+  const now =
+    engine.paused && engine.pausedAt !== null ? engine.pausedAt : performance.now();
+  return (now - engine.startedAt - engine.pausedTotal) / 1000;
 }
 
 type LiveTiming = {
@@ -203,6 +211,9 @@ export function useLiveTranscript(
       stopped: false,
       saved: null,
       saveWaiters: [],
+      paused: false,
+      pausedAt: null,
+      pausedTotal: 0,
     };
     engineRef.current = engine;
 
@@ -379,6 +390,9 @@ export function useLiveTranscript(
 
     processor.onaudioprocess = (event) => {
       if (engine.stopped) return;
+      // While paused the MediaRecorder does not capture audio, so the
+      // transcript must not accumulate it either.
+      if (engine.paused) return;
       const block = downsample(event.inputBuffer.getChannelData(0), context.sampleRate, TARGET_RATE);
       if (block.length === 0) return;
       const loud = rms(block) > SILENCE_RMS;
@@ -518,5 +532,71 @@ export function useLiveTranscript(
     return saved;
   };
 
-  return { caption, previousCaption, segments, status, finish };
+  const setPaused = (paused: boolean) => {
+    const engine = engineRef.current;
+    if (!engine || engine.stopped) return;
+    if (paused && !engine.paused) {
+      engine.paused = true;
+      engine.pausedAt = performance.now();
+    } else if (!paused && engine.paused) {
+      engine.pausedTotal += performance.now() - (engine.pausedAt ?? performance.now());
+      engine.pausedAt = null;
+      engine.paused = false;
+    }
+  };
+
+  // Clears transcript state client- and server-side while keeping the socket
+  // and audio pipeline alive — used by "Reiniciar" so captions start fresh.
+  const reset = () => {
+    const engine = engineRef.current;
+    if (!engine || engine.stopped) return;
+    engine.segments = [];
+    setSegments([]);
+    setCaption("");
+    setPreviousCaption("");
+    engine.turnChunks = [];
+    engine.pendingSamples = 0;
+    engine.turnSamples = 0;
+    engine.turnSilence = 0;
+    engine.turnStart = null;
+    engine.preRollChunks = [];
+    engine.preRollSamples = 0;
+    engine.startedAt = performance.now();
+    engine.pausedTotal = 0;
+    engine.pausedAt = null;
+    engine.paused = false;
+    engine.sendChain = engine.sendChain.then(async () => {
+      const socket = engine.ws;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "reset" }));
+      }
+    });
+  };
+
+  // Stops transcription without asking the backend to persist — used by
+  // "Cancelar". The incrementally written transcript.json is removed via the
+  // DELETE /recordings/{id} call the caller makes.
+  const discard = () => {
+    const engine = engineRef.current;
+    if (!engine || engine.stopped) return;
+    engine.stopped = true;
+    if (engine.processor) engine.processor.onaudioprocess = null;
+    const socket = engine.ws;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "discard" }));
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      try {
+        socket.close();
+      } catch {
+        /* cierre best-effort */
+      }
+    }
+  };
+
+  return { caption, previousCaption, segments, status, finish, setPaused, reset, discard };
 }
