@@ -46,7 +46,7 @@ export function ReportView({ session, transcript }: ReportViewProps) {
   return (
     <div className="flex flex-col gap-4">
       {/* Métricas principales (datos reales de la sesión) */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         {metrics.map((m) => (
           <div
             key={m.label}
