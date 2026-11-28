@@ -35,7 +35,6 @@ export function ReportView({ session, transcript }: ReportViewProps) {
 
   const metrics = [
     { label: "Duración de la sesión", value: lastEnd > 0 ? formatDuration(lastEnd) : "—", suffix: "min" },
-    { label: "Subtítulos registrados", value: `${segments.length}`, suffix: "" },
     { label: "Términos técnicos", value: `${vocabulary.length}`, suffix: "" },
     {
       label: "Video en el sistema",
