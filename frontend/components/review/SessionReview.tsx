@@ -25,7 +25,7 @@ type ReviewTab = "report" | "rubric" | "gallery";
 
 interface SessionReviewProps {
   session: SessionData | null;                // Datos del Paso 1 (SessionSetup)
-  transcript: TranscriptSaveResult | null;    // Resultado guardado por Whisper al cerrar la sesión
+  transcript: TranscriptSaveResult | null;    // Resultado guardado por GPT Transcribe al cerrar la sesión
   recordings?: SavedRecording[];              // Sesiones del candidato (modo historial)
   onBack?: () => void;                        // Volver a la vista de evaluaciones
   onNewSession: () => void;                   // Callback para volver al inicio del flujo

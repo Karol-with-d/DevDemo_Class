@@ -292,14 +292,7 @@ export default function CameraComponent({
                 <p className="mb-1 line-clamp-2 text-center text-xs text-white/70 sm:text-sm">{previousCaption}</p>
               )}
               <p className="line-clamp-3 text-center text-sm font-semibold text-white sm:text-lg">
-                {caption ||
-                  (captionStatus === "error"
-                    ? "No se pudo transcribir el audio de la cámara"
-                    : captionStatus === "saving"
-                      ? "Guardando lo que dijo el candidato..."
-                      : captionStatus === "connecting"
-                        ? "Conectando con Whisper..."
-                        : "Escuchando al candidato...")}
+                {caption || "Escuchando al docente"}
               </p>
             </div>
           </>
