@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import type { MuletillasSummary } from "../../lib/api";
 
@@ -157,12 +158,30 @@ export function TechnicalTranscript({
   segments,
   vocabulary,
   muletillas,
+  currentTime,
+  onSeek,
 }: {
   segments: TranscriptCue[];
   vocabulary: TechnicalTerm[];
   muletillas?: MuletillasSummary | null;
+  currentTime?: number;
+  onSeek?: (seconds: number) => void;
 }) {
   const groups = groupBySection(vocabulary);
+  const activeItemRef = useRef<HTMLLIElement | null>(null);
+
+  const activeIndex =
+    currentTime == null
+      ? -1
+      : segments.findIndex(
+          (seg, i) =>
+            currentTime >= seg.start &&
+            currentTime < (seg.end ?? segments[i + 1]?.start ?? Number.POSITIVE_INFINITY),
+        );
+
+  useEffect(() => {
+    activeItemRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [activeIndex]);
   const muletillaItems = muletillas?.items ?? [];
   const hasMuletillas = (muletillas?.total ?? 0) > 0;
 
@@ -218,13 +237,37 @@ export function TechnicalTranscript({
 
       <div className="mb-6 max-h-64 w-full overflow-y-auto rounded-2xl border border-white/10 bg-black/20 p-4 text-left">
         {segments.length ? (
-          <ul className="flex flex-col gap-3">
-            {segments.map((segment, index) => (
-              <li key={`${segment.start}-${index}`} className="text-sm leading-relaxed">
-                <span className="mr-2 font-semibold text-[#9ce4c1]">{cueClock(segment.start)}</span>
-                <span>{highlightText(segment.text, vocabulary)}</span>
-              </li>
-            ))}
+          <ul className="flex flex-col gap-1">
+            {segments.map((segment, index) => {
+              const isActive = index === activeIndex;
+              const isPlayed = activeIndex >= 0 && index < activeIndex;
+              return (
+                <li
+                  key={`${segment.start}-${index}`}
+                  ref={isActive ? activeItemRef : undefined}
+                  onClick={onSeek ? () => onSeek(segment.start) : undefined}
+                  title={onSeek ? "Ir a este momento del video" : undefined}
+                  className={`rounded-lg border-l-2 px-2 py-1.5 text-sm leading-relaxed transition ${
+                    onSeek ? "cursor-pointer" : ""
+                  } ${
+                    isActive
+                      ? "border-[#9ce4c1] bg-[#9ce4c1]/10"
+                      : `border-transparent ${onSeek ? "hover:bg-white/5" : ""} ${isPlayed ? "opacity-60" : ""}`
+                  }`}
+                >
+                  <span
+                    className={`mr-2 font-semibold ${
+                      isActive ? "text-[#9ce4c1]" : "text-[#9ce4c1]/70"
+                    }`}
+                  >
+                    {cueClock(segment.start)}
+                  </span>
+                  <span className={isActive ? "text-white" : "text-[#c3cdcb]"}>
+                    {highlightText(segment.text, vocabulary)}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <p className="text-sm text-[#82918f]">No se detectó voz durante la grabación.</p>

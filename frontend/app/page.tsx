@@ -150,6 +150,7 @@ export default function Page() {
             session={sessionData}
             audioContext={audioContext}
             onStopRecording={handleStopRecording}
+            onCancel={handleNewSession}
           />
         )}
 

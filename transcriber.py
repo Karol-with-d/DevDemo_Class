@@ -455,6 +455,21 @@ class TranscriptSession:
         self._muletillas_ready = True
         return self.muletillas
 
+    def reset(self):
+        """Descarta lo transcrito hasta el momento (botón 'Reiniciar' del UI)."""
+        self.segments = []
+        self.vocabulary = []
+        self._vocabulary_ready = False
+        self.muletillas = {
+            "total": 0,
+            "totalWords": 0,
+            "ratioPct": 0.0,
+            "breakdown": {},
+            "items": [],
+        }
+        self._muletillas_ready = False
+        self.write(force=True)
+
     def write(self, analyze=False, transcript_source="live", force=False):
         with _session_lock(self.session_id):
             saved = load_session_record(self.session_id) or {}

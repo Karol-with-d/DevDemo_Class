@@ -10,7 +10,7 @@
 //    modo historial para mostrar solo las grabaciones del candidato elegido.
 // ============================================================================
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { TechnicalTranscript } from "../recording/TechnicalTranscript";
 import {
   SavedRecording,
@@ -26,12 +26,22 @@ interface GalleryViewProps {
   onDelete?: (sessionId: string) => Promise<void>;
 }
 
+const formatClock = (seconds: number) => {
+  const total = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${minutes.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`;
+};
+
 export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryViewProps) {
   const controlled = items !== undefined;
   const [fetched, setFetched] = useState<SavedRecording[]>([]);
   const [internalSelected, setInternalSelected] = useState<SavedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState<number | null>(null);
 
   const list = controlled ? items : fetched;
   const selected = controlled
@@ -60,6 +70,42 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
   useEffect(() => {
     if (!controlled) refresh();
   }, [controlled]);
+
+  useEffect(() => {
+    setCurrentTime(0);
+    setVideoDuration(null);
+  }, [selected?.sessionId]);
+
+  // Los WebM de MediaRecorder no llevan duración en el header: el navegador
+  // reporta Infinity hasta que el video termina. Seek al "infinito" fuerza
+  // al navegador a calcular la duración real; luego se regresa a 0.
+  const handleLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = e.currentTarget;
+    if (Number.isFinite(video.duration)) {
+      setVideoDuration(video.duration);
+      return;
+    }
+    const onDurationChange = () => {
+      if (Number.isFinite(video.duration)) {
+        video.removeEventListener("durationchange", onDurationChange);
+        video.currentTime = 0;
+        setVideoDuration(video.duration);
+      }
+    };
+    video.addEventListener("durationchange", onDurationChange);
+    video.currentTime = 1e101;
+  };
+
+  const handleSeek = (seconds: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = seconds;
+    void video.play();
+  };
+
+  const lastSegmentEnd =
+    selected?.segments?.reduce((max, seg) => Math.max(max, seg.end ?? seg.start), 0) ?? 0;
+  const displayDuration = videoDuration ?? (lastSegmentEnd > 0 ? lastSegmentEnd : null);
 
   const handleSelect = (rec: SavedRecording) => {
     if (onSelect) onSelect(rec);
@@ -140,16 +186,30 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
             <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
               <h4 className="mb-1 text-lg font-bold">{selected.candidateName}</h4>
               <p className="mb-4 text-xs text-[#82918f]">
-                {selected.evaluatorName} · {selected.complexity} · {selected.segmentCount} subtítulos
+                {selected.evaluatorName} · {selected.complexity}
               </p>
               {selected.videoKey ? (
-                <video
-                  key={selected.videoKey}
-                  className="mb-4 aspect-video w-full rounded-xl bg-black"
-                  src={playbackUrlForKey(selected.videoKey)}
-                  controls
-                  playsInline
-                />
+                <div className="relative mb-4">
+                  <video
+                    ref={videoRef}
+                    key={selected.videoKey}
+                    className="aspect-video w-full rounded-xl bg-black"
+                    src={playbackUrlForKey(selected.videoKey)}
+                    controls
+                    playsInline
+                    onLoadedMetadata={handleLoadedMetadata}
+                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+                    onDurationChange={(e) => {
+                      if (Number.isFinite(e.currentTarget.duration)) {
+                        setVideoDuration(e.currentTarget.duration);
+                      }
+                    }}
+                  />
+                  <div className="pointer-events-none absolute right-3 top-3 rounded-md bg-black/70 px-2 py-0.5 font-mono text-xs font-semibold tabular-nums text-white">
+                    {formatClock(currentTime)} /{" "}
+                    {displayDuration != null ? formatClock(displayDuration) : "--:--"}
+                  </div>
+                </div>
               ) : (
                 <p className="mb-4 text-sm text-[#82918f]">Esta sesión no tiene video guardado.</p>
               )}
@@ -157,6 +217,8 @@ export function GalleryView({ items, selectedId, onSelect, onDelete }: GalleryVi
                 segments={selected.segments ?? []}
                 vocabulary={selected.vocabulary ?? []}
                 muletillas={selected.muletillas}
+                currentTime={selected.videoKey ? currentTime : undefined}
+                onSeek={selected.videoKey ? handleSeek : undefined}
               />
               <div className="mt-2 flex flex-wrap gap-2">
                 {selected.videoKey && (

@@ -120,10 +120,6 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {groups.map((group) => {
             const latest = group.recordings[0];
-            const totalSegments = group.recordings.reduce(
-              (acc, rec) => acc + (rec.segmentCount ?? 0),
-              0,
-            );
             return (
               <div
                 key={group.candidateName}
@@ -170,7 +166,6 @@ export function EvaluationsOverview({ onBack, onSelectCandidate }: EvaluationsOv
                     {latest.technology || "Sin tecnología"} · {latest.complexity || "—"}
                   </span>
                   <span>Última: {formatDate(latest.savedAt)}</span>
-                  <span>{totalSegments} subtítulos</span>
                 </div>
                 </button>
                 <button

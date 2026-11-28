@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import { useEffect, useRef, useState } from 'react';
-import { uploadRecording } from '../../lib/api';
+import { deleteRecording, uploadRecording } from '../../lib/api';
 import { SessionData } from '../session/SessionForm';
 import { DynamicTimer } from './DynamicTimer';
 import { TranscriptSaveResult, useLiveTranscript } from './useLiveTranscript';
@@ -45,6 +45,7 @@ interface SplitRecordingInterfaceProps {
   session: SessionData;
   audioContext?: AudioContext | null;
   onStopRecording?: (transcript: TranscriptSaveResult) => void;
+  onCancel?: () => void;
 }
 
 export function SplitRecordingInterface({
@@ -52,22 +53,28 @@ export function SplitRecordingInterface({
   session,
   audioContext,
   onStopRecording,
+  onCancel,
 }: SplitRecordingInterfaceProps) {
   const [isRecording, setIsRecording] = useState<boolean>(true);
   const [stopping, setStopping] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [runId, setRunId] = useState(0);
   const live = useLiveTranscript(stream, session, audioContext);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const audioRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
-  const startedAtRef = useRef<number>(0);
+  const activeMsRef = useRef<number>(0);
+  const segmentStartRef = useRef<number>(0);
 
   useEffect(() => {
     if (!stream || typeof MediaRecorder === 'undefined') return;
 
     chunksRef.current = [];
     audioChunksRef.current = [];
-    startedAtRef.current = performance.now();
+    activeMsRef.current = 0;
+    segmentStartRef.current = performance.now();
 
     let recorder: MediaRecorder;
     try {
@@ -131,13 +138,91 @@ export function SplitRecordingInterface({
       recorder.stop();
     });
 
+  const activeElapsedSeconds = () => {
+    const running = paused ? 0 : performance.now() - segmentStartRef.current;
+    return Math.max(0, (activeMsRef.current + running) / 1000);
+  };
+
+  const resumeRecorders = () => {
+    try {
+      recorderRef.current?.resume();
+    } catch {
+      /* ya reanudado */
+    }
+    try {
+      audioRecorderRef.current?.resume();
+    } catch {
+      /* ya reanudado */
+    }
+  };
+
+  const handlePause = () => {
+    if (paused || stopping || !isRecording) return;
+    activeMsRef.current += performance.now() - segmentStartRef.current;
+    if (recorderRef.current?.state === 'recording') recorderRef.current.pause();
+    if (audioRecorderRef.current?.state === 'recording') audioRecorderRef.current.pause();
+    live.setPaused(true);
+    setPaused(true);
+  };
+
+  const handleResume = () => {
+    segmentStartRef.current = performance.now();
+    resumeRecorders();
+    live.setPaused(false);
+    setPaused(false);
+  };
+
+  const handleRestart = () => {
+    chunksRef.current = [];
+    audioChunksRef.current = [];
+    live.reset();
+    activeMsRef.current = 0;
+    segmentStartRef.current = performance.now();
+    resumeRecorders();
+    setRunId((id) => id + 1);
+    setPaused(false);
+  };
+
+  const handleCancel = async () => {
+    if (cancelling) return;
+    if (
+      !window.confirm(
+        '¿Cancelar esta sesión? Se descartará la grabación y los subtítulos.',
+      )
+    ) {
+      return;
+    }
+    setCancelling(true);
+    try {
+      if (recorderRef.current?.state !== 'inactive') recorderRef.current?.stop();
+      if (audioRecorderRef.current?.state !== 'inactive')
+        audioRecorderRef.current?.stop();
+    } catch {
+      /* liberación best-effort */
+    }
+    live.discard();
+    try {
+      await deleteRecording(session.sessionId);
+    } catch (error) {
+      console.error('No se pudo limpiar la sesión cancelada:', error);
+    }
+    stream?.getTracks().forEach((track) => track.stop());
+    onCancel?.();
+  };
+
+  const handleFinishFromPause = () => {
+    resumeRecorders();
+    live.setPaused(false);
+    segmentStartRef.current = performance.now();
+    setPaused(false);
+    void handleStopRecording();
+  };
+
   const handleStopRecording = async () => {
     if (stopping) return;
     setStopping(true);
     setIsRecording(false);
-    const durationSeconds = startedAtRef.current
-      ? Math.max(0, (performance.now() - startedAtRef.current) / 1000)
-      : 0;
+    const durationSeconds = activeElapsedSeconds();
     const [blob, audioBlob] = await Promise.all([
       stopRecorder(recorderRef.current, chunksRef.current, 'video/webm'),
       stopRecorder(audioRecorderRef.current, audioChunksRef.current, 'audio/webm'),
@@ -172,7 +257,7 @@ export function SplitRecordingInterface({
             Grabación con subtítulos de lo que dice el candidato
           </p>
         </div>
-        <DynamicTimer isRecording={isRecording} maxTimeSeconds={900} />
+        <DynamicTimer key={runId} isRecording={isRecording && !paused} maxTimeSeconds={900} />
       </div>
 
       <CameraComponent
@@ -184,9 +269,44 @@ export function SplitRecordingInterface({
         captionStatus={stopping ? 'saving' : live.status}
       />
 
-      <div className="recording-actions flex justify-end mt-2">
+      <div className="recording-actions mt-2 flex flex-wrap justify-end gap-3">
+        {paused ? (
+          <>
+            <button
+              type="button"
+              onClick={() => void handleCancel()}
+              disabled={cancelling}
+              className="pause-button pause-button-danger"
+            >
+              {cancelling ? 'Cancelando...' : 'Cancelar'}
+            </button>
+            <button
+              type="button"
+              onClick={handleRestart}
+              className="pause-button"
+            >
+              Reiniciar
+            </button>
+            <button
+              type="button"
+              onClick={handleResume}
+              className="pause-button pause-button-active"
+            >
+              Continuar
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            onClick={handlePause}
+            disabled={!isRecording || stopping}
+            className="pause-button"
+          >
+            Pausar
+          </button>
+        )}
         <button
-          onClick={handleStopRecording}
+          onClick={paused ? handleFinishFromPause : handleStopRecording}
           disabled={!isRecording || stopping}
           className="stop-button"
         >
