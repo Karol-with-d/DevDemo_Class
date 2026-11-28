@@ -39,7 +39,7 @@ export default function Page() {
       pageAlive.current = false;
       const current = streamRef.current;
       // Dev remounts this page immediately. Releasing the camera in that
-      // pass ends the recording before Whisper can hear it.
+      // pass ends the recording before GPT Transcribe can hear it.
       setTimeout(() => {
         if (!pageAlive.current) {
           current?.getTracks().forEach((track) => track.stop());

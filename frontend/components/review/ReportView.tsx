@@ -6,7 +6,7 @@
 // resaltado.
 //
 // En esta rama los datos son REALES: provienen del TranscriptSaveResult que
-// generó el backend (Whisper + spaCy + S3) al finalizar la grabación.
+// generó el backend (GPT Transcribe + spaCy + S3) al finalizar la grabación.
 // ============================================================================
 
 import { SessionData } from "../session/SessionForm";
@@ -30,7 +30,7 @@ export function ReportView({ session, transcript }: ReportViewProps) {
   const segments = transcript?.segments ?? [];
   const vocabulary = transcript?.vocabulary ?? [];
 
-  // Duración real = fin del último subtítulo registrado por Whisper.
+  // Duración real = fin del último subtítulo registrado por GPT Transcribe.
   const lastEnd = segments.reduce((max, seg) => Math.max(max, seg.end ?? 0), 0);
 
   const metrics = [

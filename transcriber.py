@@ -88,7 +88,7 @@ def on_audio(indata, frames, time, status):
     audio_q.put(indata.copy())
 
 
-def send_to_whisper(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
+def send_to_gpt_transcriber(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
     return _run_transcription(samples, sample_rate, context, style_prompt)["text"]
 
 
@@ -103,7 +103,7 @@ def _build_verbatim_prompt(style_prompt=None):
 
 
 def _run_transcription(samples, sample_rate=SAMPLE_RATE, context=None, style_prompt=None):
-    """Same live-recorder call as send_to_whisper, plus timings for the speed log."""
+    """Same live-recorder call as send_to_gpt_transcriber, plus timings for the speed log."""
     samples = np.asarray(samples, dtype=np.float32)
     if samples.ndim > 1:
         samples = samples.mean(axis=1)
@@ -302,14 +302,14 @@ def transcribe_loop(stop_event):
         seconds = len(buffer) / SAMPLE_RATE
         paused = silence > SAMPLE_RATE * 0.4  # 0.4 s of quiet
         if (seconds > 1.5 and paused) or seconds > 8:
-            text = send_to_whisper(buffer)
+            text = send_to_gpt_transcriber(buffer)
             if text:
                 print(text, flush=True)
                 full_text.append(text)
             buffer = np.zeros(0, dtype=np.float32)
             silence = 0
     if len(buffer) > SAMPLE_RATE:
-        text = send_to_whisper(buffer)
+        text = send_to_gpt_transcriber(buffer)
         if text:
             full_text.append(text)
 
@@ -423,7 +423,7 @@ class TranscriptSession:
         return segment
 
     def analyze_vocabulary(self):
-        """spaCy + glossary once per session, after Whisper finishes."""
+        """spaCy + glossary once per session, after GPT Transcribe finishes."""
         if self._vocabulary_ready:
             return self.vocabulary
         try:
@@ -1202,7 +1202,7 @@ def transcribe_recording_file(
                     flush=True,
                 )
 
-        # Fallback or explicit file-transcription path (gpt-transcribe / whisper-1)
+        # Fallback or explicit file-transcription path (gpt-transcribe)
         if segments is None:
             used_model = "gpt-transcribe" if prefer_audio_llm else configured_model
             prepared_bytes = None

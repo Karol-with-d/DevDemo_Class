@@ -1,4 +1,4 @@
-"""Technical vocabulary and filler words (muletillas) from a Whisper transcript.
+"""Technical vocabulary and filler words (muletillas) from a GPT Transcribe transcript.
 
 Spanish NER rarely tags framework names, so tokens are classified against
 Python/JS glossaries after spaCy lemmatizes the text. Missing spaCy or the
@@ -14,7 +14,7 @@ from collections import Counter
 _nlp = None
 _nlp_failed = False
 
-# Display name -> aliases that Whisper/spaCy may produce in Spanish interviews.
+# Display name -> aliases that GPT Transcribe/spaCy may produce in Spanish interviews.
 _PYTHON_TERMS = {
     "python": ("python", "piton", "pitón"),
     "django": ("django",),
